@@ -1,0 +1,83 @@
+**Proposed File Structure and Descriptions for Nuclear Reactor Monitoring System:**
+
+1.  `main_control_system.py`
+    *   **Purpose**: Core orchestrator of the entire system. It will receive alerts from temperature monitors, dispatch the rover, manage state transitions (e.g., from autonomous rover navigation to manual control), and interface with the UI. It will also initiate logging of major events.
+    *   **Frameworks/Libraries**: Python (core logic). May use a messaging queue client library (e.g., Paho-MQTT for MQTT if that's the chosen communication protocol) to receive alerts and send commands.
+
+2.  `temperature_monitor_subsystem.py`
+    *   **Purpose**: Simulates or interfaces with the actual fiber optic temperature probes. Each instance would monitor a specific probe. It detects temperature changes, compares them against thresholds, and sends alerts (including probe ID and location) to the main control system.
+    *   **Frameworks/Libraries**: Python. Would use a networking library for communication (e.g., Paho-MQTT for publishing alerts).
+
+3.  `rover_control_subsystem.py`
+    *   **Purpose**: Handles all aspects of the rover. This includes autonomous navigation to a given location, switching to manual control mode, processing commands from the Rover Control Window (e.g., movement, arm control), and managing the return-to-start sequence. It will also stream camera feeds.
+    *   **Frameworks/Libraries**: Python. For autonomous navigation, a robotics framework like ROS (Robot Operating System) would be comprehensive, though a simpler pathfinding library (e.g., A* algorithm implementation) could be used for less complex environments. For manual control and camera streaming, networking libraries (e.g., Flask/FastAPI for providing a control API and WebRTC or RTSP for video) might be used.
+
+4.  `ui_data_window.py`
+    *   **Purpose**: Implements the Data Window of the UI. Displays real-time sensor data (potentially subscribing to updates from the temperature monitors or main system), shows alerts with probe ID and location, and lists probe locations.
+    *   **Frameworks/Libraries**: Python with a GUI framework like PyQt or Tkinter.
+
+5.  `ui_rover_control_window.py`
+    *   **Purpose**: Implements the Rover Control Window. Provides an interface for manual rover control (sending commands to `rover_control_subsystem.py`), displays live camera feeds from the rover, and offers tools for manipulation and repair.
+    *   **Frameworks/Libraries**: Python with a GUI framework (PyQt, Tkinter). Video display widgets would integrate with the rover's camera streaming mechanism.
+
+6.  `communication_protocols.py` (or a directory `communication/`)
+    *   **Purpose**: Defines the data structures and message formats for communication between subsystems (e.g., alert messages, rover commands, status updates). This ensures clear interfaces.
+    *   **Frameworks/Libraries**: Python (e.g., using dataclasses or Pydantic for message structures). If using a specific protocol like gRPC, then generated stub files would go here.
+
+7.  `event_logger.py`
+    *   **Purpose**: Handles logging of all critical system events: alerts, rover dispatch, manual interventions, repairs, errors, etc. Logs should be timestamped and detailed.
+    *   **Frameworks/Libraries**: Python's built-in `logging` module. Logs could be written to files, a database, or a centralized logging service.
+
+8.  `config.py` (or `probe_config.json`/`probe_config.yaml`)
+    *   **Purpose**: Stores configuration data such as probe IDs, their mapped locations, temperature thresholds, rover starting position, network addresses for communication, etc.
+    *   **Frameworks/Libraries**: Python for a `.py` config file. For `.json` or `.yaml`, standard libraries `json` or `PyYAML` respectively.
+
+9.  `error_handler.py`
+    *   **Purpose**: Contains utility functions and classes for robust error handling. This could include specific exception types for the application, retry mechanisms for communication, and functions to notify operators of critical failures.
+    *   **Frameworks/Libraries**: Python.
+
+**Framework Summary:**
+
+*   **Core Language**: Python
+*   **User Interface (Desktop)**: PyQt or Tkinter
+*   **Communication**:
+    *   Messaging: MQTT (e.g., using Paho-MQTT) is a strong candidate for decoupled subsystem communication.
+    *   Direct Control/Streaming (Rover): TCP/IP sockets, REST APIs (Flask/FastAPI), or WebRTC for camera feeds.
+*   **Robotics (Rover Navigation)**: ROS (if complex navigation is needed) or custom pathfinding algorithms.
+*   **Data Serialization (for communication)**: JSON, Protocol Buffers (if using gRPC).
+*   **Logging**: Python's `logging` module.
+*   **Configuration**: JSON, YAML, or Python files.
+
+**Hardware Required:**
+
+*   **Main Control System:**
+    *   **Computer/Server:** To run the `main_control_system.py`, UI components (`ui_data_window.py`, `ui_rover_control_window.py`), and `event_logger.py`.
+    *   **Wireless Communication Interface:** A transceiver (e.g., Wi-Fi adapter, LoRa gateway, Zigbee coordinator) compatible with the chosen wireless protocol used by the temperature monitoring subsystems. This enables receiving alerts.
+    *   **Network Interface Card (NIC):** For wired (Ethernet) or wireless (Wi-Fi) connection to the local network, potentially used for rover communication and general system access.
+
+*   **Temperature Monitoring Subsystems (per subsystem):**
+    *   **Fiber Optic Temperature Probes:** The actual sensors installed at weld points.
+    *   **Microcontroller/Single-Board Computer (SBC):** (e.g., ESP32, Raspberry Pi Pico W, Arduino with a wireless shield) to read data from the probe (or its interface), run the `temperature_monitor_subsystem.py` logic (or an equivalent embedded version), and manage wireless communication.
+    *   **Wireless Communication Module:** Integrated or external module (e.g., Wi-Fi, LoRa, Zigbee, Bluetooth Low Energy) to transmit alerts to the main control system. Choice depends on range, power, and data requirements.
+    *   **Power Supply:** For the microcontroller/SBC and wireless module.
+
+*   **Autonomous Rover:**
+    *   **Onboard Computer:** (e.g., Raspberry Pi, NVIDIA Jetson, or a more powerful SBC) to run `rover_control_subsystem.py` (handling navigation, manual control logic, camera streaming).
+    *   **Wireless Communication Module:** High-bandwidth wireless interface (e.g., Wi-Fi) for receiving commands from the main system/UI and streaming multiple camera feeds.
+    *   **Sensors for Navigation:**
+        *   Cameras (for visual odometry, object detection)
+        *   LiDAR (for mapping and obstacle avoidance)
+        *   Inertial Measurement Unit (IMU) (for orientation and motion tracking)
+        *   Wheel Encoders (for odometry)
+    *   **Cameras:**
+        *   Navigation camera(s)
+        *   Arm-mounted camera(s)
+        *   Weld site inspection camera(s)
+    *   **Robotic Platform:**
+        *   Chassis, motors, and motor controllers for mobility.
+        *   Manipulator arm with actuators and end-effectors for repair tasks.
+    *   **Power Supply:** High-capacity battery and power management system.
+
+*   **Network Infrastructure:**
+    *   **Wireless Access Points/Routers:** If Wi-Fi is the chosen protocol for wireless communication, robust access points will be needed to ensure coverage in the relevant areas of the facility.
+    *   **Network Switches:** If wired connections are used for parts of the system. 
