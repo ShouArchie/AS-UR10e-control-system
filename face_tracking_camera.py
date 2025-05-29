@@ -11,10 +11,11 @@ class FaceTrackingCamera:
     Face tracking camera system for UR10e robot.
     
     Features:
-    - Tracks face left/right and up/down movements
-    - Maintains stable distance (no forward/backward following)
-    - Manual distance control with up/down arrow keys
-    - Camera mounted on tool pointing along blue arrow (Z-axis)
+    - Face tracking controls green arrow (Y-axis) and blue arrow (Z-axis) movements
+    - Arrow keys control red arrow (X-axis) - pointing toward/away from user
+    - Manual distance control with up/down arrow keys along red arrow
+    - Camera mounted on tool with red arrow pointing toward user
+    - Tool-relative movements ensure consistent behavior regardless of tool orientation
     """
     
     def __init__(self, robot_ip="192.168.10.152", camera_index=0):
@@ -236,27 +237,55 @@ class FaceTrackingCamera:
         return (move_x, 0, move_z)  # No Y movement (depth)
     
     def move_robot_smooth(self, movement):
-        """Move robot smoothly to track face."""
+        """Move robot smoothly to track face using green and blue arrows (Y and Z axes)."""
         if movement is None or not self.tracking_active:
             return
         
         try:
             move_x, move_y, move_z = movement
             
-            # Get current position
-            current_x = self.robot.x
-            current_y = self.robot.y
-            current_z = self.robot.z
+            # Get current pose
+            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
+                           self.robot.rx, self.robot.ry, self.robot.rz]
             
-            # Calculate new position with smoothing
-            new_x = current_x + move_x * self.movement_smoothing
-            new_z = current_z + move_z * self.movement_smoothing
+            # Calculate tool-relative movements for face tracking using green and blue arrows
+            # Green arrow (Y-axis) for left/right movement as seen by camera
+            # Blue arrow (Z-axis) for up/down movement as seen by camera
+            rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
             
-            # Keep Y at stable distance (no depth following)
-            new_y = current_y
+            # Calculate rotation matrix components
+            cos_rx, sin_rx = math.cos(rx), math.sin(rx)
+            cos_ry, sin_ry = math.cos(ry), math.sin(ry)
+            cos_rz, sin_rz = math.cos(rz), math.sin(rz)
             
-            # Use current orientation (camera always pointing forward)
-            new_rx, new_ry, new_rz = self.base_orientation
+            # Tool coordinate system vectors
+            # Y-axis (green arrow) - left/right movement as seen by camera
+            y_axis_x = -cos_ry * sin_rz
+            y_axis_y = cos_ry * cos_rz
+            y_axis_z = 0
+            
+            # Z-axis (blue arrow) - up/down movement as seen by camera
+            z_axis_x = sin_rx * sin_ry * cos_rz - cos_rx * sin_rz
+            z_axis_y = sin_rx * sin_ry * sin_rz + cos_rx * cos_rz
+            z_axis_z = sin_rx * cos_ry
+            
+            # Apply smoothing to movements
+            smooth_move_x = move_x * self.movement_smoothing  # Camera left/right -> Green arrow
+            smooth_move_z = move_z * self.movement_smoothing  # Camera up/down -> Blue arrow
+            
+            # Calculate global movements from tool-relative movements
+            # Use green arrow for left/right, blue arrow for up/down
+            global_move_x = y_axis_x * smooth_move_x + z_axis_x * smooth_move_z
+            global_move_y = y_axis_y * smooth_move_x + z_axis_y * smooth_move_z
+            global_move_z = y_axis_z * smooth_move_x + z_axis_z * smooth_move_z
+            
+            # Calculate new position
+            new_x = current_pose[0] + global_move_x
+            new_y = current_pose[1] + global_move_y
+            new_z = current_pose[2] + global_move_z
+            
+            # Keep the same orientation
+            new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
             
             # Move robot using URScript with faster speeds for tracking
             urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.5, v=0.3)"
@@ -266,15 +295,15 @@ class FaceTrackingCamera:
             print(f"Error moving robot: {e}")
     
     def handle_distance_control(self):
-        """Handle manual distance control with arrow keys."""
+        """Handle manual distance control with arrow keys along red arrow (X-axis)."""
         while self.running:
             try:
                 if keyboard.is_pressed('up'):
-                    # Move closer (decrease Y - move toward face)
+                    # Move closer along red arrow (X-axis toward user)
                     self.adjust_distance(-0.03)  # Increased from 0.02 for faster movement
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 elif keyboard.is_pressed('down'):
-                    # Move further (increase Y - move away from face)
+                    # Move further along red arrow (X-axis away from user)
                     self.adjust_distance(0.03)  # Increased from 0.02 for faster movement
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 else:
@@ -284,35 +313,35 @@ class FaceTrackingCamera:
                 time.sleep(0.1)
     
     def adjust_distance(self, distance_change):
-        """Adjust the distance to the face using tool-relative movement."""
+        """Adjust the distance to the face using tool-relative movement along red arrow (X-axis)."""
         try:
             # Get current pose
             current_pose = [self.robot.x, self.robot.y, self.robot.z, 
                            self.robot.rx, self.robot.ry, self.robot.rz]
             
-            # Calculate tool-relative movement along Z-axis (blue arrow direction)
-            # This ensures movement is always along the camera's viewing direction
+            # Calculate tool-relative movement along X-axis (red arrow direction)
+            # This ensures movement is always along the red arrow which points toward user
             # regardless of tool orientation
             
             # Create transformation matrix for current tool orientation
             rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
             
             # Calculate rotation matrix from tool orientation
-            # For UR robots, the tool Z-axis (blue arrow) points forward
+            # For UR robots, the tool X-axis (red arrow) should point toward user
             cos_rx, sin_rx = math.cos(rx), math.sin(rx)
             cos_ry, sin_ry = math.cos(ry), math.sin(ry)
             cos_rz, sin_rz = math.cos(rz), math.sin(rz)
             
-            # Tool Z-axis direction vector (blue arrow direction)
-            # This represents the direction the camera is pointing
-            z_axis_x = -sin_ry
-            z_axis_y = sin_rx * cos_ry
-            z_axis_z = cos_rx * cos_ry
+            # Tool X-axis direction vector (red arrow direction)
+            # This represents the direction toward/away from the user
+            x_axis_x = cos_ry * cos_rz
+            x_axis_y = cos_ry * sin_rz
+            x_axis_z = -sin_ry
             
-            # Calculate movement in global coordinates along tool Z-axis
-            move_x = z_axis_x * distance_change
-            move_y = z_axis_y * distance_change
-            move_z = z_axis_z * distance_change
+            # Calculate movement in global coordinates along tool X-axis (red arrow)
+            move_x = x_axis_x * distance_change
+            move_y = x_axis_y * distance_change
+            move_z = x_axis_z * distance_change
             
             # Calculate new position
             new_x = current_pose[0] + move_x
@@ -322,7 +351,7 @@ class FaceTrackingCamera:
             # Keep the same orientation
             new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
             
-            # Move robot with tool-relative movement
+            # Move robot with tool-relative movement along red arrow
             urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.3, v=0.15)"
             self.robot.send_program(urscript_cmd)
             
@@ -331,7 +360,7 @@ class FaceTrackingCamera:
             self.current_distance = math.sqrt(move_x**2 + move_y**2 + move_z**2)
             
             direction = "closer" if distance_change < 0 else "further"
-            print(f"Moving {direction} along camera axis - Distance change: {abs(distance_change):.3f}m")
+            print(f"Moving {direction} along red arrow (toward/away from user) - Distance change: {abs(distance_change):.3f}m")
             
         except Exception as e:
             print(f"Error adjusting distance: {e}")
@@ -413,11 +442,11 @@ class FaceTrackingCamera:
         try:
             print("\n=== Face Tracking Camera System ===")
             print("Features:")
-            print("- Tracks face left/right and up/down movements")
-            print("- Maintains stable distance (no depth following)")
-            print("- UP arrow: Move closer, DOWN arrow: Move further")
+            print("- Face tracking controls green (Y) and blue (Z) arrow movements")
+            print("- Arrow keys control red arrow (X-axis) pointing toward/away from user")
+            print("- UP arrow: Move closer along red arrow, DOWN arrow: Move further")
             print("- SPACE: Toggle tracking, ESC: Exit")
-            print("- Faster movement speeds for better responsiveness")
+            print("- Tool-relative movements for consistent behavior")
             
             # Initialize systems
             if not self.connect_robot():
@@ -441,6 +470,8 @@ class FaceTrackingCamera:
             
             print("\n✓ System ready for face tracking!")
             print("Position yourself in front of the camera and press SPACE to start tracking")
+            print("Arrow keys move along red arrow (toward/away from you)")
+            print("Face tracking moves along green/blue arrows (camera left/right/up/down)")
             
             # Start threads
             self.running = True
