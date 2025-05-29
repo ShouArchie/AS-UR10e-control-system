@@ -136,7 +136,7 @@ class FaceTrackingCamera:
             # Define optimal starting position
             # Position camera at a good height and distance for face tracking
             start_x = current_pose[0]  # Keep current X
-            start_y = current_pose[1] + 0.5  # Move 50cm forward (toward user)
+            start_y = current_pose[1]   # Move 50cm forward (toward user)
             start_z = current_pose[2] + 0.2  # Move 20cm up for face level
             start_rx = 0.0  # Camera pointing forward
             start_ry = 0.0
@@ -284,28 +284,54 @@ class FaceTrackingCamera:
                 time.sleep(0.1)
     
     def adjust_distance(self, distance_change):
-        """Adjust the distance to the face."""
+        """Adjust the distance to the face using tool-relative movement."""
         try:
-            # Get current position
-            current_x = self.robot.x
-            current_y = self.robot.y
-            current_z = self.robot.z
+            # Get current pose
+            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
+                           self.robot.rx, self.robot.ry, self.robot.rz]
             
-            # Adjust Y position (depth)
-            new_y = current_y + distance_change
+            # Calculate tool-relative movement along Z-axis (blue arrow direction)
+            # This ensures movement is always along the camera's viewing direction
+            # regardless of tool orientation
             
-            # Keep X and Z the same, maintain orientation
-            new_rx, new_ry, new_rz = self.base_orientation
+            # Create transformation matrix for current tool orientation
+            rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
             
-            # Move robot with faster speeds for distance adjustment
-            urscript_cmd = f"movel(p[{current_x}, {new_y}, {current_z}, {new_rx}, {new_ry}, {new_rz}], a=0.3, v=0.15)"
+            # Calculate rotation matrix from tool orientation
+            # For UR robots, the tool Z-axis (blue arrow) points forward
+            cos_rx, sin_rx = math.cos(rx), math.sin(rx)
+            cos_ry, sin_ry = math.cos(ry), math.sin(ry)
+            cos_rz, sin_rz = math.cos(rz), math.sin(rz)
+            
+            # Tool Z-axis direction vector (blue arrow direction)
+            # This represents the direction the camera is pointing
+            z_axis_x = -sin_ry
+            z_axis_y = sin_rx * cos_ry
+            z_axis_z = cos_rx * cos_ry
+            
+            # Calculate movement in global coordinates along tool Z-axis
+            move_x = z_axis_x * distance_change
+            move_y = z_axis_y * distance_change
+            move_z = z_axis_z * distance_change
+            
+            # Calculate new position
+            new_x = current_pose[0] + move_x
+            new_y = current_pose[1] + move_y
+            new_z = current_pose[2] + move_z
+            
+            # Keep the same orientation
+            new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
+            
+            # Move robot with tool-relative movement
+            urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.3, v=0.15)"
             self.robot.send_program(urscript_cmd)
             
-            # Update current distance
-            self.current_distance = abs(new_y)
+            # Update current distance (calculate actual distance from starting position)
+            start_pos = [current_pose[0] - move_x, current_pose[1] - move_y, current_pose[2] - move_z]
+            self.current_distance = math.sqrt(move_x**2 + move_y**2 + move_z**2)
             
             direction = "closer" if distance_change < 0 else "further"
-            print(f"Moving {direction} - Distance: {self.current_distance:.3f}m")
+            print(f"Moving {direction} along camera axis - Distance change: {abs(distance_change):.3f}m")
             
         except Exception as e:
             print(f"Error adjusting distance: {e}")
