@@ -12,15 +12,15 @@ class FaceTrackingCamera:
     Face tracking camera system for UR10e robot using Google's MediaPipe.
     
     Features:
-    - Red arrow automatically points directly at user's face (automatic orientation)
-    - Face tracking up/down controls blue arrow (Z-axis) movements
-    - Face tracking left/right controls green arrow (Y-axis) movements
-    - Arrow keys control distance along red arrow (toward/away from user)
+    - Face tracking up/down controls blue arrow (up/down movements)
+    - Face tracking left/right controls green arrow (left/right movements)
+    - Arrow keys control red arrow (forward/back toward/away from user)
     - Tool-relative movements ensure consistent behavior regardless of tool orientation
     - Google MediaPipe for smooth and accurate face detection
+    - Maintains wrist1 joint relationship: 90° + elbow_angle - abs(shoulder_angle)
     """
     
-    def __init__(self, robot_ip="192.168.0.100", camera_index=0):
+    def __init__(self, robot_ip="192.168.0.101", camera_index=0):
         """Initialize the face tracking camera system."""
         self.robot = None
         self.robot_ip = robot_ip
@@ -42,9 +42,14 @@ class FaceTrackingCamera:
         self.current_distance = self.stable_distance
         
         # Movement parameters - increased for faster response
-        self.movement_sensitivity = 0.002  # Increased from 0.001 for faster response
-        self.max_movement_per_step = 0.05  # Increased from 0.02 for faster movement
-        self.movement_smoothing = 0.7  # Increased from 0.3 for more responsive movement
+        self.movement_sensitivity = 0.001  # Reduced for smoother movement
+        self.max_movement_per_step = 0.02  # Reduced for smoother movement
+        self.movement_smoothing = 0.3  # Reduced for more responsive but smooth movement
+        
+        # Movement smoothing for better tracking
+        self.last_movement = [0.0, 0.0, 0.0]  # Store last movement for smoothing
+        self.movement_filter_strength = 0.7  # Higher = more smoothing
+        self.min_movement_threshold = 0.001  # Minimum movement to prevent micro-adjustments
         
         # Camera frame parameters
         self.frame_width = 640
@@ -109,277 +114,175 @@ class FaceTrackingCamera:
             cv2.destroyAllWindows()
             print("Camera released.")
     
-    def setup_camera_position(self):
-        """Set up initial camera position and orientation."""
+    def get_robot_pose(self):
+        """Get robot pose as a list of floats, handling PoseVector objects robustly."""
         try:
-            print("Setting up camera position...")
+            pose = self.robot.getl()
             
-            # Get current position
-            self.current_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                               self.robot.rx, self.robot.ry, self.robot.rz]
-            
-            # Set base orientation - camera pointing forward (blue arrow direction)
-            # Blue arrow (Z-axis) should point toward the face
-            self.base_orientation = [0.0, 0.0, 0.0]  # Camera pointing forward
-            
-            print(f"Current position: {[f'{x:.3f}' for x in self.current_pose[:3]]}")
-            print(f"Camera orientation: Blue arrow pointing forward")
-            print(f"Stable tracking distance: {self.stable_distance:.2f}m")
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error setting up camera position: {e}")
-            return False
-    
-    def move_to_starting_position(self):
-        """Move robot to optimal starting position for face tracking using joint positions."""
-        try:
-            print("Moving to face tracking starting position using joint positions...")
-            
-            # Get current joint positions as reference
-            current_joints = self.robot.getj()
-            print(f"Current joint positions: {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
-            
-            # Define optimal starting joint positions
-            # Set base joint (joint 0) to 0 degrees and wrist 3 (joint 5) to -90 degrees
-            
-            # Convert desired degrees to radians for calculations
-            shoulder_angle_deg = -60.0
-            elbow_angle_deg = 80
-            
-            shoulder_angle_rad = math.radians(shoulder_angle_deg)
-            elbow_angle_rad = math.radians(elbow_angle_deg)
-            
-            # Wrist 1 (joint 3) calculation using the correct formula:
-            # wrist1_angle = 90 degrees + elbow_angle - abs(shoulder_angle)
-            # This ensures proper orientation for the face tracking task
-            wrist1_angle_deg = 90 + elbow_angle_deg - abs(shoulder_angle_deg)
-            wrist1_angle_rad = math.radians(wrist1_angle_deg)
-            
-            print(f"Wrist1 calculation: 90° + {elbow_angle_deg}° - abs({shoulder_angle_deg}°) = {wrist1_angle_deg}°")
-            
-            start_joints = [
-                0.0,                    # Base joint (joint 0) = 0 degrees
-                shoulder_angle_rad,     # Shoulder joint (joint 1) = 60 degrees
-                elbow_angle_rad,        # Elbow joint (joint 2) = 120 degrees
-                wrist1_angle_rad,       # Wrist 1 joint (joint 3) calculated using formula
-                3*math.pi/2,            # Keep current wrist 2 joint (or set to a specific value, e.g., math.pi/2)
-                -math.pi/2              # Wrist 3 joint (joint 5) = -90 degrees
-            ]
-            
-            print(f"Target joint positions: {[f'{math.degrees(j):.1f}°' for j in start_joints]}")
-            
-            # Check if movement is needed (tolerance of 0.01 radians ≈ 0.6 degrees)
-            movement_needed = False
-            tolerance = 0.01
-            for i, (current, target) in enumerate(zip(current_joints, start_joints)):
-                if abs(current - target) > tolerance:
-                    movement_needed = True
-                    print(f"Joint {i} needs movement: {math.degrees(current):.1f}° → {math.degrees(target):.1f}°")
-            
-            if movement_needed:
-                # Move to starting joint positions with safe speed
-                print("Moving to starting joint positions...")
-                self.robot.movej(start_joints, acc=0.3, vel=0.2)
-                
-                # Wait for movement to complete
-                time.sleep(1)
-                while self.robot.is_program_running():
-                    time.sleep(0.1)
-                print("✓ Joint movement completed")
+            # Handle different possible formats
+            if hasattr(pose, 'array'):
+                # Try different ways to access the array
+                try:
+                    if hasattr(pose.array, 'tolist'):
+                        return pose.array.tolist()
+                    else:
+                        return list(pose.array)
+                except:
+                    # If array access fails, try to convert directly
+                    return [float(x) for x in pose.array]
+            elif hasattr(pose, 'get_array'):
+                array_data = pose.get_array()
+                if hasattr(array_data, 'tolist'):
+                    return array_data.tolist()
+                else:
+                    return list(array_data)
+            elif hasattr(pose, 'tolist'):
+                return pose.tolist()
+            elif hasattr(pose, '__iter__'):
+                # If it's iterable, convert to list
+                return [float(x) for x in pose]
             else:
-                print("✓ Robot already at target joint positions - no movement needed")
-            
-            # Get final joint positions and Cartesian pose
-            final_joints = self.robot.getj()
-            final_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                         self.robot.rx, self.robot.ry, self.robot.rz]
-            
-            print(f"✓ Final joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
-            print(f"✓ Final Cartesian pose: {[f'{x:.3f}' for x in final_pose]}")
-            
-            # Update base orientation from the final Cartesian pose
-            self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
-            self.current_distance = abs(final_pose[1])  # Estimate distance from Y position
-            
-            print(f"✓ Camera ready for face tracking")
-            print(f"✓ Base joint: {math.degrees(final_joints[0]):.1f}°, Wrist 3 joint: {math.degrees(final_joints[5]):.1f}°")
-            
-            return True
+                # Last resort: try to access as attributes
+                print("Using attribute access fallback for pose")
+                return [float(pose[i]) for i in range(6)]
             
         except Exception as e:
-            print(f"Error moving to starting position: {e}")
-            print("Continuing with current position...")
+            print(f"Error getting robot pose with getl(): {e}")
             
-            # Even if movement fails, try to continue with current position
+            # Ultimate fallback: use URScript to get pose
             try:
-                final_joints = self.robot.getj()
-                final_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                             self.robot.rx, self.robot.ry, self.robot.rz]
+                print("Trying URScript fallback for pose...")
+                urscript_cmd = "get_actual_tcp_pose()"
+                # This approach gets the pose through URScript
+                # We'll need to use a different method since direct URScript return is complex
                 
-                self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
-                self.current_distance = abs(final_pose[1])
+                # Alternative: try individual property access with float conversion
+                x = float(self.robot.x) if hasattr(self.robot.x, '__float__') else self.robot.x.array[0] if hasattr(self.robot.x, 'array') else 0.0
+                y = float(self.robot.y) if hasattr(self.robot.y, '__float__') else self.robot.y.array[0] if hasattr(self.robot.y, 'array') else 0.0
+                z = float(self.robot.z) if hasattr(self.robot.z, '__float__') else self.robot.z.array[0] if hasattr(self.robot.z, 'array') else 0.0
+                rx = float(self.robot.rx) if hasattr(self.robot.rx, '__float__') else self.robot.rx.array[0] if hasattr(self.robot.rx, 'array') else 0.0
+                ry = float(self.robot.ry) if hasattr(self.robot.ry, '__float__') else self.robot.ry.array[0] if hasattr(self.robot.ry, 'array') else 0.0
+                rz = float(self.robot.rz) if hasattr(self.robot.rz, '__float__') else self.robot.rz.array[0] if hasattr(self.robot.rz, 'array') else 0.0
                 
-                print(f"✓ Using current position for face tracking")
-                print(f"✓ Current joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
-                return True
+                return [x, y, z, rx, ry, rz]
+                
             except Exception as e2:
-                print(f"Failed to get current position: {e2}")
-                return False
-    
-    def detect_faces(self, frame):
-        """Detect faces in the frame using MediaPipe (Google's face detection)."""
+                print(f"Fallback pose retrieval also failed: {e2}")
+                # Return last known pose or zeros
+                if hasattr(self, 'last_known_pose'):
+                    print("Using last known pose")
+                    return self.last_known_pose
+                else:
+                    print("Using zero pose as last resort")
+                    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    def safe_translate(self, movement, acc=0.3, vel=0.15):
+        """Safely translate robot position using URScript to bypass PoseVector issues."""
         try:
-            # Convert BGR to RGB for MediaPipe
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            move_x, move_y, move_z = movement
             
-            # Process the frame with MediaPipe
-            results = self.face_detection.process(rgb_frame)
+            # Get current pose
+            current_pose = self.get_robot_pose()
+            self.last_known_pose = current_pose.copy()  # Store for fallback
             
-            # Convert MediaPipe detections to format similar to OpenCV
-            faces = []
-            if results.detections:
-                for detection in results.detections:
-                    # Get bounding box
-                    bbox = detection.location_data.relative_bounding_box
-                    
-                    # Convert relative coordinates to pixel coordinates
-                    x = int(bbox.xmin * frame.shape[1])
-                    y = int(bbox.ymin * frame.shape[0])
-                    w = int(bbox.width * frame.shape[1])
-                    h = int(bbox.height * frame.shape[0])
-                    
-                    # Ensure coordinates are within frame bounds
-                    x = max(0, x)
-                    y = max(0, y)
-                    w = min(w, frame.shape[1] - x)
-                    h = min(h, frame.shape[0] - y)
-                    
-                    # Add confidence score for better tracking
-                    confidence = detection.score[0]
-                    faces.append((x, y, w, h, confidence))
+            # Calculate new position
+            new_x = current_pose[0] + move_x
+            new_y = current_pose[1] + move_y
+            new_z = current_pose[2] + move_z
             
-            return faces
+            # Keep same orientation
+            new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
+            
+            # Use URScript movel command directly to bypass translate() PoseVector issues
+            urscript_cmd = f"movel(p[{new_x:.6f}, {new_y:.6f}, {new_z:.6f}, {new_rx:.6f}, {new_ry:.6f}, {new_rz:.6f}], a={acc}, v={vel})"
+            print(f"Sending safe translate: {urscript_cmd}")
+            self.robot.send_program(urscript_cmd)
             
         except Exception as e:
-            print(f"Error detecting faces with MediaPipe: {e}")
-            return []
-    
-    def calculate_face_center(self, faces):
-        """Calculate the center of the most confident detected face."""
-        if len(faces) == 0:
-            return None
-        
-        # Find the face with highest confidence score
-        # MediaPipe faces format: (x, y, w, h, confidence)
-        if len(faces[0]) == 5:  # MediaPipe format with confidence
-            best_face = max(faces, key=lambda face: face[4])  # Sort by confidence
-            x, y, w, h, confidence = best_face
-        else:  # Fallback to OpenCV format
-            best_face = max(faces, key=lambda face: face[2] * face[3])  # Sort by area
-            x, y, w, h = best_face
-        
-        # Calculate center of the face
-        face_center_x = x + w // 2
-        face_center_y = y + h // 2
-        
-        return (face_center_x, face_center_y, w, h)
-    
-    def calculate_movement(self, face_center):
-        """Calculate required robot movement based on face position."""
-        if face_center is None:
-            return None
-        
-        face_x, face_y, face_w, face_h = face_center
-        
-        # Calculate offset from frame center
-        offset_x = face_x - self.frame_center_x
-        offset_y = face_y - self.frame_center_y
-        
-        # Temporary debug for face movement
-        print(f"Face at ({face_x}, {face_y}), offset: ({offset_x}, {offset_y})")
-        
-        # Apply dead zone to prevent jittery movements
-        if abs(offset_x) < self.dead_zone_pixels:
-            offset_x = 0
-        if abs(offset_y) < self.dead_zone_pixels:
-            offset_y = 0
-        
-        # Convert pixel offsets to robot movements
-        # Positive offset_x = face is to the right, robot should move right
-        # Positive offset_y = face is down, robot should move down
-        move_x = offset_x * self.movement_sensitivity
-        move_z = -offset_y * self.movement_sensitivity  # Negative because Y is inverted
-        
-        # Limit maximum movement per step
-        move_x = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_x))
-        move_z = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_z))
-        
-        print(f"Movement: left/right={move_x:.4f}, up/down={move_z:.4f}")
-        
-        return (move_x, 0, move_z)  # No Y movement (depth)
+            print(f"Error in safe_translate: {e}")
     
     def move_robot_smooth(self, movement):
-        """Move robot smoothly to track face using .translate() to preserve orientation and joint relationships."""
+        """Move robot smoothly to track face using joint-based movement to preserve wrist1 relationship."""
         if movement is None or not self.tracking_active:
             return
+        
+        # Rate limiting: only send commands every few frames to prevent choppy movement
+        if not hasattr(self, '_last_robot_command_time'):
+            self._last_robot_command_time = 0
+        
+        current_time = time.time()
+        if current_time - self._last_robot_command_time < 0.1:  # Limit to 10 commands per second
+            return
+        
+        # Check if movement is significant enough to warrant a robot command
+        if (abs(movement[0]) < self.min_movement_threshold and 
+            abs(movement[2]) < self.min_movement_threshold):
+            return  # Skip insignificant movements
         
         try:
             move_x, move_y, move_z = movement
             
-            # Get current pose for reference
-            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                           self.robot.rx, self.robot.ry, self.robot.rz]
+            # Get current joint positions to maintain relationships
+            current_joints = self.robot.getj()
             
-            print(f"Tool orientation: RX={math.degrees(current_pose[3]):.1f}°, RY={math.degrees(current_pose[4]):.1f}°, RZ={math.degrees(current_pose[5]):.1f}°")
+            # Extract current joint angles
+            base_angle = current_joints[0]          # Joint 0 (base)
+            shoulder_angle = current_joints[1]      # Joint 1 (shoulder) 
+            elbow_angle = current_joints[2]         # Joint 2 (elbow)
+            wrist1_angle = current_joints[3]        # Joint 3 (wrist 1)
+            wrist2_angle = current_joints[4]        # Joint 4 (wrist 2)
+            wrist3_angle = current_joints[5]        # Joint 5 (wrist 3)
             
-            # Calculate tool-relative movements for face tracking using green and blue arrows
-            # Green arrow (Y-axis) for left/right movement as seen by camera
-            # Blue arrow (Z-axis) for up/down movement as seen by camera
-            rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
+            print(f"Face tracking movement: left/right={move_x:.4f}, up/down={move_z:.4f}")
             
-            # Calculate rotation matrix components
-            cos_rx, sin_rx = math.cos(rx), math.sin(rx)
-            cos_ry, sin_ry = math.cos(ry), math.sin(ry)
-            cos_rz, sin_rz = math.cos(rz), math.sin(rz)
+            # Map face movements to joint adjustments:
+            # Face left/right (move_x) → Green arrow → Base joint rotation
+            # Face up/down (move_z) → Blue arrow → Shoulder/elbow adjustments (FLIPPED)
             
-            # Tool coordinate system vectors
-            # For UR robots with standard tool orientation:
-            # X-axis (red arrow) - forward direction
-            # Y-axis (green arrow) - left/right direction  
-            # Z-axis (blue arrow) - up/down direction
+            # Calculate joint adjustments (reduced for smoother movement)
+            base_adjustment = move_x * 1.5          # Reduced from 2.0 for smoother movement
+            shoulder_adjustment = -move_z * 0.8     # Reduced from 1.0 for smoother movement
+            elbow_adjustment = move_z * 0.6         # Reduced from 0.8 for smoother movement
             
-            # Y-axis (green arrow) - left/right movement as seen by camera
-            y_axis_x = -sin_rz
-            y_axis_y = cos_rz
-            y_axis_z = 0
+            # Calculate new joint angles
+            new_base_angle = base_angle + base_adjustment
+            new_shoulder_angle = shoulder_angle + shoulder_adjustment  
+            new_elbow_angle = elbow_angle + elbow_adjustment
             
-            # Z-axis (blue arrow) - up/down movement as seen by camera
-            z_axis_x = -cos_rz * sin_ry
-            z_axis_y = -sin_rz * sin_ry
-            z_axis_z = cos_ry
+            # Apply the wrist1 formula to maintain relationship
+            # wrist1_angle = 90° + elbow_angle - abs(shoulder_angle)
+            shoulder_angle_deg = math.degrees(new_shoulder_angle)
+            elbow_angle_deg = math.degrees(new_elbow_angle)
+            wrist1_angle_deg = 90 + elbow_angle_deg - abs(shoulder_angle_deg)
+            new_wrist1_angle = math.radians(-wrist1_angle_deg)  # Convert back to radians with correct sign
             
-            print(f"Green arrow direction: ({y_axis_x:.3f}, {y_axis_y:.3f}, {y_axis_z:.3f})")
-            print(f"Blue arrow direction: ({z_axis_x:.3f}, {z_axis_y:.3f}, {z_axis_z:.3f})")
+            # Apply the wrist3 formula: wrist3 = -90° + base_angle
+            base_angle_deg = math.degrees(new_base_angle)
+            wrist3_angle_deg = -90 + base_angle_deg
+            new_wrist3_angle = math.radians(wrist3_angle_deg)
             
-            # Apply smoothing to movements
-            smooth_move_x = move_x * self.movement_smoothing  # Camera left/right -> Green arrow
-            smooth_move_z = move_z * self.movement_smoothing  # Camera up/down -> Blue arrow
+            print(f"Wrist1 formula: 90° + {elbow_angle_deg:.1f}° - abs({shoulder_angle_deg:.1f}°) = {wrist1_angle_deg:.1f}°")
+            print(f"Wrist3 formula: -90° + {base_angle_deg:.1f}° = {wrist3_angle_deg:.1f}°")
             
-            # Calculate global movements from tool-relative movements
-            # Use green arrow for left/right, blue arrow for up/down
-            global_move_x = y_axis_x * smooth_move_x + z_axis_x * smooth_move_z
-            global_move_y = y_axis_y * smooth_move_x + z_axis_y * smooth_move_z
-            global_move_z = y_axis_z * smooth_move_x + z_axis_z * smooth_move_z
+            # Create new joint positions maintaining the relationships
+            new_joints = [
+                new_base_angle,       # Adjusted base for left/right tracking
+                new_shoulder_angle,   # Adjusted shoulder for up/down tracking
+                new_elbow_angle,      # Adjusted elbow for up/down tracking
+                new_wrist1_angle,     # Calculated using formula
+                wrist2_angle,         # Keep wrist 2 unchanged
+                new_wrist3_angle      # Calculated using wrist3 formula
+            ]
             
-            print(f"Global movement: X={global_move_x:.4f}, Y={global_move_y:.4f}, Z={global_move_z:.4f}")
+            print(f"Joint adjustments: Base: {math.degrees(base_adjustment):.2f}°, Shoulder: {math.degrees(shoulder_adjustment):.2f}°, Elbow: {math.degrees(elbow_adjustment):.2f}°")
             
-            # Use .translate() to move while preserving orientation and joint relationships
-            # This maintains the wrist1 formula: 90° + elbow_angle - abs(shoulder_angle)
-            self.robot.translate((global_move_x, global_move_y, global_move_z), acc=0.5, vel=0.2)
+            # Use movej to maintain exact joint relationships and prevent unwanted rotations
+            self.robot.movej(new_joints, acc=0.8, vel=0.3)  # Increased speed for more responsive movement
             
-            print(f"Using .translate() to preserve joint relationships and orientation")
+            # Update the last command time
+            self._last_robot_command_time = current_time
+            
+            print(f"Using joint-based movement to preserve wrist1 and wrist3 relationships")
             
         except Exception as e:
             print(f"Error moving robot: {e}")
@@ -396,9 +299,8 @@ class FaceTrackingCamera:
             if target_orientation is None:
                 return
             
-            # Get current position
-            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                           self.robot.rx, self.robot.ry, self.robot.rz]
+            # Get current position using helper method to avoid PoseVector issues
+            current_pose = self.get_robot_pose()
             
             # Apply smoothing to orientation changes to prevent jerky movements
             orientation_smoothing = 0.1  # Lower value for smoother orientation changes
@@ -422,16 +324,16 @@ class FaceTrackingCamera:
             print(f"Error updating orientation to face: {e}")
     
     def handle_distance_control(self):
-        """Handle manual distance control with arrow keys along red arrow (X-axis)."""
+        """Handle manual distance control with arrow keys along red arrow (forward/back)."""
         while self.running:
             try:
                 if keyboard.is_pressed('up'):
-                    # Move closer along red arrow (X-axis toward user)
-                    self.adjust_distance(-0.03)  # Increased from 0.02 for faster movement
+                    # Move back along red arrow (away from user)
+                    self.adjust_distance(0.03)  # Positive = move back/away
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 elif keyboard.is_pressed('down'):
-                    # Move further along red arrow (X-axis away from user)
-                    self.adjust_distance(0.03)  # Increased from 0.02 for faster movement
+                    # Move forward along red arrow (toward user)
+                    self.adjust_distance(-0.03)  # Negative = move forward/closer
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 else:
                     time.sleep(0.05)
@@ -440,46 +342,68 @@ class FaceTrackingCamera:
                 time.sleep(0.1)
     
     def adjust_distance(self, distance_change):
-        """Adjust the distance to the face using .translate() along red arrow (X-axis) to preserve joint relationships."""
+        """Adjust the distance using joint-based movement to preserve the wrist1 and wrist3 relationship formulas."""
         try:
-            # Get current pose for reference
-            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                           self.robot.rx, self.robot.ry, self.robot.rz]
+            # Get current joint positions to maintain relationships
+            current_joints = self.robot.getj()
+            print(f"Current joints before movement: {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
             
-            # Calculate tool-relative movement along X-axis (red arrow direction)
-            # This ensures movement is always along the red arrow which points toward user
-            # regardless of tool orientation
+            # Extract current joint angles
+            base_angle = current_joints[0]          # Joint 0 (base)
+            shoulder_angle = current_joints[1]      # Joint 1 (shoulder) 
+            elbow_angle = current_joints[2]         # Joint 2 (elbow)
+            wrist1_angle = current_joints[3]        # Joint 3 (wrist 1)
+            wrist2_angle = current_joints[4]        # Joint 4 (wrist 2)
+            wrist3_angle = current_joints[5]        # Joint 5 (wrist 3)
             
-            # Create transformation matrix for current tool orientation
-            rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
+            # For red arrow movement (forward/back), we primarily adjust the shoulder and elbow
+            # while maintaining the wrist1 and wrist3 relationship formulas
             
-            # Calculate rotation matrix from tool orientation
-            # For UR robots, the tool X-axis (red arrow) should point toward user
-            cos_rx, sin_rx = math.cos(rx), math.sin(rx)
-            cos_ry, sin_ry = math.cos(ry), math.sin(ry)
-            cos_rz, sin_rz = math.cos(rz), math.sin(rz)
+            # Calculate movement adjustments for forward/back motion
+            # Positive distance_change = move away, negative = move closer
+            shoulder_adjustment = distance_change * 0.3  # Adjust shoulder angle
+            elbow_adjustment = -distance_change * 0.5    # Opposite elbow adjustment for smooth motion
             
-            # Tool X-axis direction vector (red arrow direction)
-            # This represents the direction toward/away from the user
-            x_axis_x = cos_ry * cos_rz
-            x_axis_y = cos_ry * sin_rz
-            x_axis_z = -sin_ry
+            # Calculate new joint angles
+            new_shoulder_angle = shoulder_angle + shoulder_adjustment
+            new_elbow_angle = elbow_angle + elbow_adjustment
             
-            # Calculate movement in global coordinates along tool X-axis (red arrow)
-            move_x = x_axis_x * distance_change
-            move_y = x_axis_y * distance_change
-            move_z = x_axis_z * distance_change
+            # Apply the wrist1 formula to maintain relationship
+            # wrist1_angle = 90° + elbow_angle - abs(shoulder_angle)
+            shoulder_angle_deg = math.degrees(new_shoulder_angle)
+            elbow_angle_deg = math.degrees(new_elbow_angle)
+            wrist1_angle_deg = 90 + elbow_angle_deg - abs(shoulder_angle_deg)
+            new_wrist1_angle = math.radians(-wrist1_angle_deg)  # Convert back to radians with correct sign
             
-            # Use .translate() to move while preserving orientation and joint relationships
-            # This maintains the wrist1 formula: 90° + elbow_angle - abs(shoulder_angle)
-            self.robot.translate((move_x, move_y, move_z), acc=0.3, vel=0.15)
+            # Apply the wrist3 formula: wrist3 = -90° + base_angle
+            base_angle_deg = math.degrees(base_angle)  # Base doesn't change for distance adjustment
+            wrist3_angle_deg = -90 + base_angle_deg
+            new_wrist3_angle = math.radians(wrist3_angle_deg)
             
-            # Update current distance (calculate actual distance from starting position)
-            self.current_distance = math.sqrt(move_x**2 + move_y**2 + move_z**2)
+            print(f"Wrist1 formula: 90° + {elbow_angle_deg:.1f}° - abs({shoulder_angle_deg:.1f}°) = {wrist1_angle_deg:.1f}°")
+            print(f"Wrist3 formula: -90° + {base_angle_deg:.1f}° = {wrist3_angle_deg:.1f}°")
+            
+            # Create new joint positions maintaining the relationships
+            new_joints = [
+                base_angle,           # Keep base joint unchanged
+                new_shoulder_angle,   # Adjusted shoulder
+                new_elbow_angle,      # Adjusted elbow  
+                new_wrist1_angle,     # Calculated using formula
+                wrist2_angle,         # Keep wrist 2 unchanged
+                new_wrist3_angle      # Calculated using wrist3 formula
+            ]
+            
+            print(f"New joints: {[f'{math.degrees(j):.1f}°' for j in new_joints]}")
+            
+            # Use movej to maintain exact joint relationships and prevent unwanted rotations
+            self.robot.movej(new_joints, acc=0.3, vel=0.15)
             
             direction = "closer" if distance_change < 0 else "further"
-            print(f"Moving {direction} along red arrow using .translate() - Distance change: {abs(distance_change):.3f}m")
-            print(f"Preserving wrist1 joint relationship: 90° + elbow_angle - abs(shoulder_angle)")
+            print(f"Moving {direction} using joint-based movement - preserving wrist1 and wrist3 relationships")
+            print(f"Shoulder: {math.degrees(shoulder_angle):.1f}° → {math.degrees(new_shoulder_angle):.1f}°")
+            print(f"Elbow: {math.degrees(elbow_angle):.1f}° → {math.degrees(new_elbow_angle):.1f}°")
+            print(f"Wrist1: {math.degrees(wrist1_angle):.1f}° → {math.degrees(new_wrist1_angle):.1f}°")
+            print(f"Wrist3: {math.degrees(wrist3_angle):.1f}° → {math.degrees(new_wrist3_angle):.1f}°")
             
         except Exception as e:
             print(f"Error adjusting distance: {e}")
@@ -565,7 +489,7 @@ class FaceTrackingCamera:
                     status = "activated" if self.tracking_active else "paused"
                     print(f"Face tracking {status}")
                 
-                time.sleep(0.03)  # ~30 FPS
+                time.sleep(0.01)  # Increased frame rate from ~30 FPS to ~60 FPS for smoother tracking
                 
             except Exception as e:
                 print(f"Error in camera loop: {e}")
@@ -576,10 +500,9 @@ class FaceTrackingCamera:
         try:
             print("\n=== Face Tracking Camera System ===")
             print("Features:")
-            print("- Red arrow automatically points directly at user's face (automatic orientation)")
-            print("- Face tracking up/down controls blue arrow (Z-axis) movements")
-            print("- Face tracking left/right controls green arrow (Y-axis) movements")
-            print("- Arrow keys control distance along red arrow (toward/away from user)")
+            print("- Face tracking up/down controls blue arrow (up/down movements)")
+            print("- Face tracking left/right controls green arrow (left/right movements)")
+            print("- Arrow keys control red arrow (forward/back toward/away from user)")
             print("- SPACE: Toggle tracking, ESC: Exit")
             print("- Google MediaPipe for smooth and accurate face detection")
             
@@ -605,10 +528,10 @@ class FaceTrackingCamera:
             
             print("\n✓ System ready for face tracking!")
             print("Position yourself in front of the camera and press SPACE to start tracking")
-            print("Red arrow will automatically point at your face")
-            print("Move your face up/down → Blue arrow movement")
-            print("Move your face left/right → Green arrow movement")
-            print("Arrow keys → Move closer/further along red arrow")
+            print("Face tracking controls:")
+            print("- Move your face up/down → Blue arrow movement (up/down)")
+            print("- Move your face left/right → Green arrow movement (left/right)")
+            print("- Arrow keys → Red arrow movement (forward/back toward/away from user)")
             
             # Start threads
             self.running = True
@@ -648,8 +571,9 @@ class FaceTrackingCamera:
             return None
         
         try:
-            # Get current robot position
-            robot_pos = [self.robot.x, self.robot.y, self.robot.z]
+            # Get current robot position using helper method to avoid PoseVector issues
+            robot_pose = self.get_robot_pose()
+            robot_pos = robot_pose[:3]  # Extract [x, y, z]
             
             # Estimate face position in 3D space
             # This is a simplified estimation - in reality you'd need depth info
@@ -699,6 +623,260 @@ class FaceTrackingCamera:
         except Exception as e:
             print(f"Error calculating face pointing orientation: {e}")
             return None
+
+    def setup_camera_position(self):
+        """Set up initial camera position and orientation."""
+        try:
+            print("Setting up camera position...")
+            
+            # Get current position using helper method to avoid PoseVector issues
+            self.current_pose = self.get_robot_pose()
+            
+            # Set base orientation - camera pointing forward (blue arrow direction)
+            # Blue arrow (Z-axis) should point toward the face
+            self.base_orientation = [0.0, 0.0, 0.0]  # Camera pointing forward
+            
+            print(f"Current position: {[f'{x:.3f}' for x in self.current_pose[:3]]}")
+            print(f"Camera orientation: Blue arrow pointing forward")
+            print(f"Stable tracking distance: {self.stable_distance:.2f}m")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error setting up camera position: {e}")
+            return False
+    
+    def move_to_starting_position(self):
+        """Move robot to optimal starting position for face tracking using joint positions."""
+        try:
+            print("Moving to face tracking starting position using joint positions...")
+            
+            # Get current joint positions as reference
+            current_joints = self.robot.getj()
+            print(f"Current joint positions: {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
+            
+            # Define optimal starting joint positions
+            # Set base joint (joint 0) to 0 degrees and wrist 3 (joint 5) to -90 degrees
+            
+            # Convert desired degrees to radians for calculations
+            shoulder_angle_deg = -60.0
+            elbow_angle_deg = 80
+            
+            shoulder_angle_rad = math.radians(shoulder_angle_deg)
+            elbow_angle_rad = math.radians(elbow_angle_deg)
+            
+            # Wrist 1 (joint 3) calculation using the correct formula:
+            # wrist1_angle = 90 degrees + elbow_angle - abs(shoulder_angle)
+            # This ensures proper orientation for the face tracking task
+            wrist1_angle_deg = 90 + elbow_angle_deg - abs(shoulder_angle_deg)
+            wrist1_angle_rad = math.radians(-wrist1_angle_deg)
+            
+            # Wrist 3 (joint 5) calculation using the formula:
+            # wrist3_angle = -90 degrees + base_angle  
+            base_angle_deg = 0.0  # Base joint is 0 degrees
+            wrist3_angle_deg = -90 + base_angle_deg
+            wrist3_angle_rad = math.radians(wrist3_angle_deg)
+            
+            print(f"Wrist1 calculation: 90° + {elbow_angle_deg}° - abs({shoulder_angle_deg}°) = {wrist1_angle_deg}°")
+            print(f"Wrist3 calculation: -90° + {base_angle_deg}° = {wrist3_angle_deg}°")
+            
+            start_joints = [
+                0.0,                    # Base joint (joint 0) = 0 degrees
+                shoulder_angle_rad,     # Shoulder joint (joint 1) = 60 degrees
+                elbow_angle_rad,        # Elbow joint (joint 2) = 120 degrees
+                wrist1_angle_rad,       # Wrist 1 joint (joint 3) calculated using formula
+                3*math.pi/2,            # Keep current wrist 2 joint (or set to a specific value, e.g., math.pi/2)
+                wrist3_angle_rad        # Wrist 3 joint (joint 5) calculated using formula
+            ]
+            
+            print(f"Target joint positions: {[f'{math.degrees(j):.1f}°' for j in start_joints]}")
+            
+            # Check if movement is needed (tolerance of 0.01 radians ≈ 0.6 degrees)
+            movement_needed = False
+            tolerance = 0.01
+            for i, (current, target) in enumerate(zip(current_joints, start_joints)):
+                if abs(current - target) > tolerance:
+                    movement_needed = True
+                    print(f"Joint {i} needs movement: {math.degrees(current):.1f}° → {math.degrees(target):.1f}°")
+            
+            if movement_needed:
+                # Move to starting joint positions with safe speed
+                print("Moving to starting joint positions...")
+                self.robot.movej(start_joints, acc=0.3, vel=0.2)
+                
+                # Wait for movement to complete
+                time.sleep(1)
+                while self.robot.is_program_running():
+                    time.sleep(0.1)
+                print("✓ Joint movement completed")
+            else:
+                print("✓ Robot already at target joint positions - no movement needed")
+            
+            # Get final joint positions and Cartesian pose with better error handling
+            try:
+                print("Getting final joint positions...")
+                final_joints = self.robot.getj()
+                print("Getting final Cartesian pose...")
+                final_pose = self.get_robot_pose()  # Use helper method to handle PoseVector issues
+                
+                print(f"✓ Final joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
+                print(f"✓ Final Cartesian pose: {[f'{x:.3f}' for x in final_pose]}")
+                
+                # Update base orientation from the final Cartesian pose
+                self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
+                self.current_distance = abs(final_pose[1])  # Estimate distance from Y position
+                
+                print(f"✓ Camera ready for face tracking")
+                print(f"✓ Base joint: {math.degrees(final_joints[0]):.1f}°, Wrist 3 joint: {math.degrees(final_joints[5]):.1f}°")
+                
+                return True
+                
+            except Exception as pose_error:
+                print(f"Error getting final pose: {pose_error}")
+                print(f"Error type: {type(pose_error)}")
+                raise pose_error
+            
+        except Exception as e:
+            print(f"Error moving to starting position: {e}")
+            print(f"Error type: {type(e)}")
+            print("Continuing with current position...")
+            
+            # Even if movement fails, try to continue with current position
+            try:
+                print("Attempting to get current position for fallback...")
+                final_joints = self.robot.getj()
+                print("Got joints, now getting pose...")
+                final_pose = self.get_robot_pose()  # Use helper method to handle PoseVector issues
+                print("Got pose successfully")
+                
+                self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
+                self.current_distance = abs(final_pose[1])
+                
+                print(f"✓ Using current position for face tracking")
+                print(f"✓ Current joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
+                return True
+            except Exception as e2:
+                print(f"Failed to get current position: {e2}")
+                print(f"Error type: {type(e2)}")
+                return False
+    
+    def detect_faces(self, frame):
+        """Detect faces in the frame using MediaPipe (Google's face detection)."""
+        try:
+            # Convert BGR to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Process the frame with MediaPipe
+            results = self.face_detection.process(rgb_frame)
+            
+            # Convert MediaPipe detections to format similar to OpenCV
+            faces = []
+            if results.detections:
+                for detection in results.detections:
+                    # Get bounding box
+                    bbox = detection.location_data.relative_bounding_box
+                    
+                    # Convert relative coordinates to pixel coordinates
+                    x = int(bbox.xmin * frame.shape[1])
+                    y = int(bbox.ymin * frame.shape[0])
+                    w = int(bbox.width * frame.shape[1])
+                    h = int(bbox.height * frame.shape[0])
+                    
+                    # Ensure coordinates are within frame bounds
+                    x = max(0, x)
+                    y = max(0, y)
+                    w = min(w, frame.shape[1] - x)
+                    h = min(h, frame.shape[0] - y)
+                    
+                    # Add confidence score for better tracking
+                    confidence = detection.score[0]
+                    faces.append((x, y, w, h, confidence))
+            
+            return faces
+            
+        except Exception as e:
+            print(f"Error detecting faces with MediaPipe: {e}")
+            return []
+    
+    def calculate_face_center(self, faces):
+        """Calculate the center of the most confident detected face."""
+        if len(faces) == 0:
+            return None
+        
+        # Find the face with highest confidence score
+        # MediaPipe faces format: (x, y, w, h, confidence)
+        if len(faces[0]) == 5:  # MediaPipe format with confidence
+            best_face = max(faces, key=lambda face: face[4])  # Sort by confidence
+            x, y, w, h, confidence = best_face
+        else:  # Fallback to OpenCV format
+            best_face = max(faces, key=lambda face: face[2] * face[3])  # Sort by area
+            x, y, w, h = best_face
+        
+        # Calculate center of the face
+        face_center_x = x + w // 2
+        face_center_y = y + h // 2
+        
+        return (face_center_x, face_center_y, w, h)
+    
+    def calculate_movement(self, face_center):
+        """Calculate required robot movement based on face position with smoothing."""
+        if face_center is None:
+            return None
+        
+        face_x, face_y, face_w, face_h = face_center
+        
+        # Calculate offset from frame center
+        offset_x = face_x - self.frame_center_x
+        offset_y = face_y - self.frame_center_y
+        
+        # Debug output (reduce frequency to avoid spam)
+        if hasattr(self, '_debug_counter'):
+            self._debug_counter += 1
+        else:
+            self._debug_counter = 0
+            
+        if self._debug_counter % 10 == 0:  # Print every 10th frame
+            print(f"Face at ({face_x}, {face_y}), offset: ({offset_x}, {offset_y})")
+        
+        # Apply dead zone to prevent jittery movements
+        if abs(offset_x) < self.dead_zone_pixels:
+            offset_x = 0
+        if abs(offset_y) < self.dead_zone_pixels:
+            offset_y = 0
+        
+        # Convert pixel offsets to robot movements
+        # SWAPPED: Negative offset_x because camera is flipped (-1)
+        # Positive offset_x = face is to the right on flipped camera, robot should move left
+        move_x = -offset_x * self.movement_sensitivity  # SWAPPED for flipped camera
+        move_z = -offset_y * self.movement_sensitivity  # Negative because Y is inverted
+        
+        # Limit maximum movement per step
+        move_x = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_x))
+        move_z = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_z))
+        
+        # Apply movement smoothing filter
+        current_movement = [move_x, 0, move_z]
+        
+        # Blend with last movement for smoothing
+        smoothed_movement = [
+            self.last_movement[0] * self.movement_filter_strength + current_movement[0] * (1 - self.movement_filter_strength),
+            0,  # No Y movement
+            self.last_movement[2] * self.movement_filter_strength + current_movement[2] * (1 - self.movement_filter_strength)
+        ]
+        
+        # Apply minimum threshold to prevent micro-movements
+        if abs(smoothed_movement[0]) < self.min_movement_threshold:
+            smoothed_movement[0] = 0
+        if abs(smoothed_movement[2]) < self.min_movement_threshold:
+            smoothed_movement[2] = 0
+        
+        # Store for next iteration
+        self.last_movement = smoothed_movement.copy()
+        
+        if self._debug_counter % 10 == 0:  # Print every 10th frame
+            print(f"Smoothed movement: left/right={smoothed_movement[0]:.4f}, up/down={smoothed_movement[2]:.4f}")
+        
+        return tuple(smoothed_movement)
 
 # Example usage
 if __name__ == "__main__":
