@@ -42,14 +42,14 @@ class FaceTrackingCamera:
         self.current_distance = self.stable_distance
         
         # Movement parameters - increased for faster response
-        self.movement_sensitivity = 0.001  # Reduced for smoother movement
+        self.movement_sensitivity = 0.005  # Increased for more responsive movement
         self.max_movement_per_step = 0.02  # Reduced for smoother movement
         self.movement_smoothing = 0.3  # Reduced for more responsive but smooth movement
         
         # Movement smoothing for better tracking
         self.last_movement = [0.0, 0.0, 0.0]  # Store last movement for smoothing
         self.movement_filter_strength = 0.7  # Higher = more smoothing
-        self.min_movement_threshold = 0.001  # Minimum movement to prevent micro-adjustments
+        self.min_movement_threshold = 0.0005  # Reduced threshold for more responsive movement
         
         # Camera frame parameters
         self.frame_width = 640
@@ -59,6 +59,8 @@ class FaceTrackingCamera:
         
         # Dead zone to prevent jittery movements
         self.dead_zone_pixels = 15  # Reduced from 20 for more responsive tracking
+        # Circular dead zone radius - if face is within this radius of center, no movement commands sent
+        self.center_dead_zone_radius = 30  # pixels - adjust this value to change the size of the center dead zone
         
         # Current robot position
         self.current_pose = None
@@ -211,7 +213,7 @@ class FaceTrackingCamera:
             self._last_robot_command_time = 0
         
         current_time = time.time()
-        if current_time - self._last_robot_command_time < 0.1:  # Limit to 10 commands per second
+        if current_time - self._last_robot_command_time < 0.05:  # Limit to 20 commands per second
             return
         
         # Check if movement is significant enough to warrant a robot command
@@ -233,16 +235,20 @@ class FaceTrackingCamera:
             wrist2_angle = current_joints[4]        # Joint 4 (wrist 2)
             wrist3_angle = current_joints[5]        # Joint 5 (wrist 3)
             
-            print(f"Face tracking movement: left/right={move_x:.4f}, up/down={move_z:.4f}")
+            print(f"\n=== ROBOT MOVEMENT DEBUG ===")
+            print(f"Face movement input: left/right={move_x:.6f}, up/down={move_z:.6f}")
+            print(f"Current joint positions (degrees): {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
             
             # Map face movements to joint adjustments:
             # Face left/right (move_x) → Green arrow → Base joint rotation
             # Face up/down (move_z) → Blue arrow → Shoulder/elbow adjustments (FLIPPED)
             
-            # Calculate joint adjustments (reduced for smoother movement)
-            base_adjustment = move_x * 1.5          # Reduced from 2.0 for smoother movement
-            shoulder_adjustment = -move_z * 0.8     # Reduced from 1.0 for smoother movement
-            elbow_adjustment = move_z * 0.6         # Reduced from 0.8 for smoother movement
+            # Calculate joint adjustments (increased for more noticeable movement)
+            base_adjustment = move_x * 3.0          # Increased for more noticeable movement
+            shoulder_adjustment = -move_z * 1.5     # Increased for more noticeable movement
+            elbow_adjustment = move_z * 1.2         # Increased for more noticeable movement
+            
+            print(f"Joint adjustments (degrees): Base={math.degrees(base_adjustment):.3f}°, Shoulder={math.degrees(shoulder_adjustment):.3f}°, Elbow={math.degrees(elbow_adjustment):.3f}°")
             
             # Calculate new joint angles
             new_base_angle = base_angle + base_adjustment
@@ -274,15 +280,25 @@ class FaceTrackingCamera:
                 new_wrist3_angle      # Calculated using wrist3 formula
             ]
             
+            print(f"NEW joint positions (degrees): {[f'{math.degrees(j):.1f}°' for j in new_joints]}")
+            
+            # Get current Cartesian position for reference
+            try:
+                current_pose = self.get_robot_pose()
+                print(f"Current Cartesian position: X={current_pose[0]:.3f}, Y={current_pose[1]:.3f}, Z={current_pose[2]:.3f}")
+            except:
+                print("Could not get current Cartesian position")
+            
             print(f"Joint adjustments: Base: {math.degrees(base_adjustment):.2f}°, Shoulder: {math.degrees(shoulder_adjustment):.2f}°, Elbow: {math.degrees(elbow_adjustment):.2f}°")
             
             # Use movej to maintain exact joint relationships and prevent unwanted rotations
+            print(f"Sending movej command with acc=0.8, vel=0.3...")
             self.robot.movej(new_joints, acc=0.8, vel=0.3)  # Increased speed for more responsive movement
             
             # Update the last command time
             self._last_robot_command_time = current_time
             
-            print(f"Using joint-based movement to preserve wrist1 and wrist3 relationships")
+            print(f"=== END DEBUG ===\n")
             
         except Exception as e:
             print(f"Error moving robot: {e}")
@@ -584,7 +600,7 @@ class FaceTrackingCamera:
             estimated_face_distance = 0.8  # Assume face is 80cm away
             
             # Calculate face offset from camera center in world coordinates
-            pixel_to_world_scale = 0.001  # Rough conversion factor
+            pixel_to_world_scale = 0.005  # Rough conversion factor
             face_offset_x = (face_x - self.frame_center_x) * pixel_to_world_scale
             face_offset_y = -(face_y - self.frame_center_y) * pixel_to_world_scale  # Invert Y
             
@@ -829,6 +845,20 @@ class FaceTrackingCamera:
         offset_x = face_x - self.frame_center_x
         offset_y = face_y - self.frame_center_y
         
+        # Calculate distance from center using Pythagorean theorem
+        distance_from_center = math.sqrt(offset_x**2 + offset_y**2)
+        
+        # Check if face is within the circular dead zone around center
+        if distance_from_center <= self.center_dead_zone_radius:
+            if hasattr(self, '_debug_counter'):
+                self._debug_counter += 1
+            else:
+                self._debug_counter = 0
+                
+            if self._debug_counter % 30 == 0:  # Print every 30th frame when in dead zone
+                print(f"Face within dead zone (distance: {distance_from_center:.1f} pixels, radius: {self.center_dead_zone_radius} pixels) - no movement sent")
+            return None  # No movement needed, face is well-centered
+        
         # Debug output (reduce frequency to avoid spam)
         if hasattr(self, '_debug_counter'):
             self._debug_counter += 1
@@ -836,7 +866,7 @@ class FaceTrackingCamera:
             self._debug_counter = 0
             
         if self._debug_counter % 10 == 0:  # Print every 10th frame
-            print(f"Face at ({face_x}, {face_y}), offset: ({offset_x}, {offset_y})")
+            print(f"Face at ({face_x}, {face_y}), offset: ({offset_x}, {offset_y}), distance from center: {distance_from_center:.1f}")
         
         # Apply dead zone to prevent jittery movements
         if abs(offset_x) < self.dead_zone_pixels:
