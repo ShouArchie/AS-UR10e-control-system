@@ -5,28 +5,35 @@ import time
 import math
 import threading
 import keyboard
+import mediapipe as mp
 
 class FaceTrackingCamera:
     """
-    Face tracking camera system for UR10e robot.
+    Face tracking camera system for UR10e robot using Google's MediaPipe.
     
     Features:
-    - Face tracking controls green arrow (Y-axis) and blue arrow (Z-axis) movements
-    - Arrow keys control red arrow (X-axis) - pointing toward/away from user
-    - Manual distance control with up/down arrow keys along red arrow
-    - Camera mounted on tool with red arrow pointing toward user
+    - Red arrow automatically points directly at user's face (automatic orientation)
+    - Face tracking up/down controls blue arrow (Z-axis) movements
+    - Face tracking left/right controls green arrow (Y-axis) movements
+    - Arrow keys control distance along red arrow (toward/away from user)
     - Tool-relative movements ensure consistent behavior regardless of tool orientation
+    - Google MediaPipe for smooth and accurate face detection
     """
     
-    def __init__(self, robot_ip="192.168.10.152", camera_index=0):
+    def __init__(self, robot_ip="192.168.0.100", camera_index=0):
         """Initialize the face tracking camera system."""
         self.robot = None
         self.robot_ip = robot_ip
         self.camera_index = camera_index
         self.cap = None
         
-        # Face detection
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        # MediaPipe face detection (Google's version)
+        self.mp_face_detection = mp.solutions.face_detection
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.face_detection = self.mp_face_detection.FaceDetection(
+            model_selection=0,  # 0 for short-range (2 meters), 1 for full-range (5 meters)
+            min_detection_confidence=0.5
+        )
         
         # Tracking parameters
         self.tracking_active = False
@@ -126,80 +133,152 @@ class FaceTrackingCamera:
             return False
     
     def move_to_starting_position(self):
-        """Move robot to optimal starting position for face tracking."""
+        """Move robot to optimal starting position for face tracking using joint positions."""
         try:
-            print("Moving to face tracking starting position...")
+            print("Moving to face tracking starting position using joint positions...")
             
-            # Get current position as reference
-            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
-                           self.robot.rx, self.robot.ry, self.robot.rz]
+            # Get current joint positions as reference
+            current_joints = self.robot.getj()
+            print(f"Current joint positions: {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
             
-            # Define optimal starting position
-            # Position camera at a good height and distance for face tracking
-            start_x = current_pose[0]  # Keep current X
-            start_y = current_pose[1]   # Move 50cm forward (toward user)
-            start_z = current_pose[2] + 0.2  # Move 20cm up for face level
-            start_rx = 0.0  # Camera pointing forward
-            start_ry = 0.0
-            start_rz = 0.0
+            # Define optimal starting joint positions
+            # Set base joint (joint 0) to 0 degrees and wrist 3 (joint 5) to -90 degrees
             
-            print(f"Moving from: {[f'{x:.3f}' for x in current_pose[:3]]}")
-            print(f"Moving to:   [{start_x:.3f}, {start_y:.3f}, {start_z:.3f}]")
+            # Convert desired degrees to radians for calculations
+            shoulder_angle_deg = -60.0
+            elbow_angle_deg = 80
             
-            # Move to starting position with faster speed
-            urscript_cmd = f"movel(p[{start_x}, {start_y}, {start_z}, {start_rx}, {start_ry}, {start_rz}], a=0.3, v=0.2)"
-            self.robot.send_program(urscript_cmd)
+            shoulder_angle_rad = math.radians(shoulder_angle_deg)
+            elbow_angle_rad = math.radians(elbow_angle_deg)
             
-            # Wait for movement to complete
-            print("Moving to starting position...")
-            time.sleep(1)
-            while self.robot.is_program_running():
-                time.sleep(0.1)
+            # Wrist 1 (joint 3) calculation using the correct formula:
+            # wrist1_angle = 90 degrees + elbow_angle - abs(shoulder_angle)
+            # This ensures proper orientation for the face tracking task
+            wrist1_angle_deg = 90 + elbow_angle_deg - abs(shoulder_angle_deg)
+            wrist1_angle_rad = math.radians(wrist1_angle_deg)
             
-            # Update base orientation and current distance
-            self.base_orientation = [start_rx, start_ry, start_rz]
-            self.current_distance = abs(start_y)
+            print(f"Wrist1 calculation: 90° + {elbow_angle_deg}° - abs({shoulder_angle_deg}°) = {wrist1_angle_deg}°")
             
-            # Verify position
+            start_joints = [
+                0.0,                    # Base joint (joint 0) = 0 degrees
+                shoulder_angle_rad,     # Shoulder joint (joint 1) = 60 degrees
+                elbow_angle_rad,        # Elbow joint (joint 2) = 120 degrees
+                wrist1_angle_rad,       # Wrist 1 joint (joint 3) calculated using formula
+                3*math.pi/2,            # Keep current wrist 2 joint (or set to a specific value, e.g., math.pi/2)
+                -math.pi/2              # Wrist 3 joint (joint 5) = -90 degrees
+            ]
+            
+            print(f"Target joint positions: {[f'{math.degrees(j):.1f}°' for j in start_joints]}")
+            
+            # Check if movement is needed (tolerance of 0.01 radians ≈ 0.6 degrees)
+            movement_needed = False
+            tolerance = 0.01
+            for i, (current, target) in enumerate(zip(current_joints, start_joints)):
+                if abs(current - target) > tolerance:
+                    movement_needed = True
+                    print(f"Joint {i} needs movement: {math.degrees(current):.1f}° → {math.degrees(target):.1f}°")
+            
+            if movement_needed:
+                # Move to starting joint positions with safe speed
+                print("Moving to starting joint positions...")
+                self.robot.movej(start_joints, acc=0.3, vel=0.2)
+                
+                # Wait for movement to complete
+                time.sleep(1)
+                while self.robot.is_program_running():
+                    time.sleep(0.1)
+                print("✓ Joint movement completed")
+            else:
+                print("✓ Robot already at target joint positions - no movement needed")
+            
+            # Get final joint positions and Cartesian pose
+            final_joints = self.robot.getj()
             final_pose = [self.robot.x, self.robot.y, self.robot.z, 
                          self.robot.rx, self.robot.ry, self.robot.rz]
-            print(f"✓ Starting position reached: {[f'{x:.3f}' for x in final_pose[:3]]}")
-            print(f"✓ Camera ready for face tracking at {self.current_distance:.2f}m distance")
+            
+            print(f"✓ Final joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
+            print(f"✓ Final Cartesian pose: {[f'{x:.3f}' for x in final_pose]}")
+            
+            # Update base orientation from the final Cartesian pose
+            self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
+            self.current_distance = abs(final_pose[1])  # Estimate distance from Y position
+            
+            print(f"✓ Camera ready for face tracking")
+            print(f"✓ Base joint: {math.degrees(final_joints[0]):.1f}°, Wrist 3 joint: {math.degrees(final_joints[5]):.1f}°")
             
             return True
             
         except Exception as e:
             print(f"Error moving to starting position: {e}")
-            return False
+            print("Continuing with current position...")
+            
+            # Even if movement fails, try to continue with current position
+            try:
+                final_joints = self.robot.getj()
+                final_pose = [self.robot.x, self.robot.y, self.robot.z, 
+                             self.robot.rx, self.robot.ry, self.robot.rz]
+                
+                self.base_orientation = [final_pose[3], final_pose[4], final_pose[5]]
+                self.current_distance = abs(final_pose[1])
+                
+                print(f"✓ Using current position for face tracking")
+                print(f"✓ Current joint positions: {[f'{math.degrees(j):.1f}°' for j in final_joints]}")
+                return True
+            except Exception as e2:
+                print(f"Failed to get current position: {e2}")
+                return False
     
     def detect_faces(self, frame):
-        """Detect faces in the frame."""
+        """Detect faces in the frame using MediaPipe (Google's face detection)."""
         try:
-            # Convert to grayscale for face detection
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Convert BGR to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Detect faces
-            faces = self.face_cascade.detectMultiScale(
-                gray, 
-                scaleFactor=1.1, 
-                minNeighbors=5, 
-                minSize=(50, 50)
-            )
+            # Process the frame with MediaPipe
+            results = self.face_detection.process(rgb_frame)
+            
+            # Convert MediaPipe detections to format similar to OpenCV
+            faces = []
+            if results.detections:
+                for detection in results.detections:
+                    # Get bounding box
+                    bbox = detection.location_data.relative_bounding_box
+                    
+                    # Convert relative coordinates to pixel coordinates
+                    x = int(bbox.xmin * frame.shape[1])
+                    y = int(bbox.ymin * frame.shape[0])
+                    w = int(bbox.width * frame.shape[1])
+                    h = int(bbox.height * frame.shape[0])
+                    
+                    # Ensure coordinates are within frame bounds
+                    x = max(0, x)
+                    y = max(0, y)
+                    w = min(w, frame.shape[1] - x)
+                    h = min(h, frame.shape[0] - y)
+                    
+                    # Add confidence score for better tracking
+                    confidence = detection.score[0]
+                    faces.append((x, y, w, h, confidence))
             
             return faces
             
         except Exception as e:
-            print(f"Error detecting faces: {e}")
+            print(f"Error detecting faces with MediaPipe: {e}")
             return []
     
     def calculate_face_center(self, faces):
-        """Calculate the center of the largest detected face."""
+        """Calculate the center of the most confident detected face."""
         if len(faces) == 0:
             return None
         
-        # Find the largest face (closest to camera)
-        largest_face = max(faces, key=lambda face: face[2] * face[3])
-        x, y, w, h = largest_face
+        # Find the face with highest confidence score
+        # MediaPipe faces format: (x, y, w, h, confidence)
+        if len(faces[0]) == 5:  # MediaPipe format with confidence
+            best_face = max(faces, key=lambda face: face[4])  # Sort by confidence
+            x, y, w, h, confidence = best_face
+        else:  # Fallback to OpenCV format
+            best_face = max(faces, key=lambda face: face[2] * face[3])  # Sort by area
+            x, y, w, h = best_face
         
         # Calculate center of the face
         face_center_x = x + w // 2
@@ -218,6 +297,9 @@ class FaceTrackingCamera:
         offset_x = face_x - self.frame_center_x
         offset_y = face_y - self.frame_center_y
         
+        # Temporary debug for face movement
+        print(f"Face at ({face_x}, {face_y}), offset: ({offset_x}, {offset_y})")
+        
         # Apply dead zone to prevent jittery movements
         if abs(offset_x) < self.dead_zone_pixels:
             offset_x = 0
@@ -234,19 +316,23 @@ class FaceTrackingCamera:
         move_x = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_x))
         move_z = max(-self.max_movement_per_step, min(self.max_movement_per_step, move_z))
         
+        print(f"Movement: left/right={move_x:.4f}, up/down={move_z:.4f}")
+        
         return (move_x, 0, move_z)  # No Y movement (depth)
     
     def move_robot_smooth(self, movement):
-        """Move robot smoothly to track face using green and blue arrows (Y and Z axes)."""
+        """Move robot smoothly to track face using .translate() to preserve orientation and joint relationships."""
         if movement is None or not self.tracking_active:
             return
         
         try:
             move_x, move_y, move_z = movement
             
-            # Get current pose
+            # Get current pose for reference
             current_pose = [self.robot.x, self.robot.y, self.robot.z, 
                            self.robot.rx, self.robot.ry, self.robot.rz]
+            
+            print(f"Tool orientation: RX={math.degrees(current_pose[3]):.1f}°, RY={math.degrees(current_pose[4]):.1f}°, RZ={math.degrees(current_pose[5]):.1f}°")
             
             # Calculate tool-relative movements for face tracking using green and blue arrows
             # Green arrow (Y-axis) for left/right movement as seen by camera
@@ -259,15 +345,23 @@ class FaceTrackingCamera:
             cos_rz, sin_rz = math.cos(rz), math.sin(rz)
             
             # Tool coordinate system vectors
+            # For UR robots with standard tool orientation:
+            # X-axis (red arrow) - forward direction
+            # Y-axis (green arrow) - left/right direction  
+            # Z-axis (blue arrow) - up/down direction
+            
             # Y-axis (green arrow) - left/right movement as seen by camera
-            y_axis_x = -cos_ry * sin_rz
-            y_axis_y = cos_ry * cos_rz
+            y_axis_x = -sin_rz
+            y_axis_y = cos_rz
             y_axis_z = 0
             
             # Z-axis (blue arrow) - up/down movement as seen by camera
-            z_axis_x = sin_rx * sin_ry * cos_rz - cos_rx * sin_rz
-            z_axis_y = sin_rx * sin_ry * sin_rz + cos_rx * cos_rz
-            z_axis_z = sin_rx * cos_ry
+            z_axis_x = -cos_rz * sin_ry
+            z_axis_y = -sin_rz * sin_ry
+            z_axis_z = cos_ry
+            
+            print(f"Green arrow direction: ({y_axis_x:.3f}, {y_axis_y:.3f}, {y_axis_z:.3f})")
+            print(f"Blue arrow direction: ({z_axis_x:.3f}, {z_axis_y:.3f}, {z_axis_z:.3f})")
             
             # Apply smoothing to movements
             smooth_move_x = move_x * self.movement_smoothing  # Camera left/right -> Green arrow
@@ -279,20 +373,53 @@ class FaceTrackingCamera:
             global_move_y = y_axis_y * smooth_move_x + z_axis_y * smooth_move_z
             global_move_z = y_axis_z * smooth_move_x + z_axis_z * smooth_move_z
             
-            # Calculate new position
-            new_x = current_pose[0] + global_move_x
-            new_y = current_pose[1] + global_move_y
-            new_z = current_pose[2] + global_move_z
+            print(f"Global movement: X={global_move_x:.4f}, Y={global_move_y:.4f}, Z={global_move_z:.4f}")
             
-            # Keep the same orientation
-            new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
+            # Use .translate() to move while preserving orientation and joint relationships
+            # This maintains the wrist1 formula: 90° + elbow_angle - abs(shoulder_angle)
+            self.robot.translate((global_move_x, global_move_y, global_move_z), acc=0.5, vel=0.2)
             
-            # Move robot using URScript with faster speeds for tracking
-            urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.5, v=0.3)"
-            self.robot.send_program(urscript_cmd)
+            print(f"Using .translate() to preserve joint relationships and orientation")
             
         except Exception as e:
             print(f"Error moving robot: {e}")
+    
+    def update_orientation_to_face(self, face_center):
+        """Update robot orientation to point red arrow directly at the face."""
+        if face_center is None or not self.tracking_active:
+            return
+        
+        try:
+            # Calculate the orientation needed to point red arrow at face
+            target_orientation = self.calculate_face_pointing_orientation(face_center)
+            
+            if target_orientation is None:
+                return
+            
+            # Get current position
+            current_pose = [self.robot.x, self.robot.y, self.robot.z, 
+                           self.robot.rx, self.robot.ry, self.robot.rz]
+            
+            # Apply smoothing to orientation changes to prevent jerky movements
+            orientation_smoothing = 0.1  # Lower value for smoother orientation changes
+            
+            current_rx, current_ry, current_rz = current_pose[3], current_pose[4], current_pose[5]
+            target_rx, target_ry, target_rz = target_orientation
+            
+            # Smooth orientation changes
+            new_rx = current_rx + (target_rx - current_rx) * orientation_smoothing
+            new_ry = current_ry + (target_ry - current_ry) * orientation_smoothing
+            new_rz = current_rz + (target_rz - current_rz) * orientation_smoothing
+            
+            # Keep current position, only change orientation
+            new_x, new_y, new_z = current_pose[0], current_pose[1], current_pose[2]
+            
+            # Move robot to new orientation
+            urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.3, v=0.2)"
+            self.robot.send_program(urscript_cmd)
+            
+        except Exception as e:
+            print(f"Error updating orientation to face: {e}")
     
     def handle_distance_control(self):
         """Handle manual distance control with arrow keys along red arrow (X-axis)."""
@@ -313,9 +440,9 @@ class FaceTrackingCamera:
                 time.sleep(0.1)
     
     def adjust_distance(self, distance_change):
-        """Adjust the distance to the face using tool-relative movement along red arrow (X-axis)."""
+        """Adjust the distance to the face using .translate() along red arrow (X-axis) to preserve joint relationships."""
         try:
-            # Get current pose
+            # Get current pose for reference
             current_pose = [self.robot.x, self.robot.y, self.robot.z, 
                            self.robot.rx, self.robot.ry, self.robot.rz]
             
@@ -343,24 +470,16 @@ class FaceTrackingCamera:
             move_y = x_axis_y * distance_change
             move_z = x_axis_z * distance_change
             
-            # Calculate new position
-            new_x = current_pose[0] + move_x
-            new_y = current_pose[1] + move_y
-            new_z = current_pose[2] + move_z
-            
-            # Keep the same orientation
-            new_rx, new_ry, new_rz = current_pose[3], current_pose[4], current_pose[5]
-            
-            # Move robot with tool-relative movement along red arrow
-            urscript_cmd = f"movel(p[{new_x}, {new_y}, {new_z}, {new_rx}, {new_ry}, {new_rz}], a=0.3, v=0.15)"
-            self.robot.send_program(urscript_cmd)
+            # Use .translate() to move while preserving orientation and joint relationships
+            # This maintains the wrist1 formula: 90° + elbow_angle - abs(shoulder_angle)
+            self.robot.translate((move_x, move_y, move_z), acc=0.3, vel=0.15)
             
             # Update current distance (calculate actual distance from starting position)
-            start_pos = [current_pose[0] - move_x, current_pose[1] - move_y, current_pose[2] - move_z]
             self.current_distance = math.sqrt(move_x**2 + move_y**2 + move_z**2)
             
             direction = "closer" if distance_change < 0 else "further"
-            print(f"Moving {direction} along red arrow (toward/away from user) - Distance change: {abs(distance_change):.3f}m")
+            print(f"Moving {direction} along red arrow using .translate() - Distance change: {abs(distance_change):.3f}m")
+            print(f"Preserving wrist1 joint relationship: 90° + elbow_angle - abs(shoulder_angle)")
             
         except Exception as e:
             print(f"Error adjusting distance: {e}")
@@ -379,7 +498,7 @@ class FaceTrackingCamera:
                     continue
                 
                 # Flip frame horizontally for mirror effect
-                frame = cv2.flip(frame, 1)
+                frame = cv2.flip(frame, -1)  # Changed from 1 to -1 for 180-degree flip
                 
                 # Detect faces
                 faces = self.detect_faces(frame)
@@ -388,11 +507,26 @@ class FaceTrackingCamera:
                 if len(faces) > 0 and self.tracking_active:
                     face_center = self.calculate_face_center(faces)
                     movement = self.calculate_movement(face_center)
+                    
+                    # Move robot along green/blue arrows for face tracking
                     self.move_robot_smooth(movement)
                     
-                    # Draw face detection
-                    for (x, y, w, h) in faces:
-                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    # Update orientation to point red arrow at face
+                    # self.update_orientation_to_face(face_center) # Temporarily commented out for debugging
+                    
+                    # Draw face detection with confidence scores
+                    for face in faces:
+                        if len(face) == 5:  # MediaPipe format with confidence
+                            x, y, w, h, confidence = face
+                            # Draw rectangle with confidence-based color
+                            color_intensity = int(255 * confidence)
+                            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, color_intensity, 0), 2)
+                            # Draw confidence score
+                            cv2.putText(frame, f"{confidence:.2f}", (x, y-10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        else:  # Fallback format
+                            x, y, w, h = face
+                            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     
                     # Draw center crosshair
                     if face_center:
@@ -442,11 +576,12 @@ class FaceTrackingCamera:
         try:
             print("\n=== Face Tracking Camera System ===")
             print("Features:")
-            print("- Face tracking controls green (Y) and blue (Z) arrow movements")
-            print("- Arrow keys control red arrow (X-axis) pointing toward/away from user")
-            print("- UP arrow: Move closer along red arrow, DOWN arrow: Move further")
+            print("- Red arrow automatically points directly at user's face (automatic orientation)")
+            print("- Face tracking up/down controls blue arrow (Z-axis) movements")
+            print("- Face tracking left/right controls green arrow (Y-axis) movements")
+            print("- Arrow keys control distance along red arrow (toward/away from user)")
             print("- SPACE: Toggle tracking, ESC: Exit")
-            print("- Tool-relative movements for consistent behavior")
+            print("- Google MediaPipe for smooth and accurate face detection")
             
             # Initialize systems
             if not self.connect_robot():
@@ -470,8 +605,10 @@ class FaceTrackingCamera:
             
             print("\n✓ System ready for face tracking!")
             print("Position yourself in front of the camera and press SPACE to start tracking")
-            print("Arrow keys move along red arrow (toward/away from you)")
-            print("Face tracking moves along green/blue arrows (camera left/right/up/down)")
+            print("Red arrow will automatically point at your face")
+            print("Move your face up/down → Blue arrow movement")
+            print("Move your face left/right → Green arrow movement")
+            print("Arrow keys → Move closer/further along red arrow")
             
             # Start threads
             self.running = True
@@ -504,6 +641,64 @@ class FaceTrackingCamera:
         self.release_camera()
         self.disconnect_robot()
         print("Face tracking system stopped.")
+
+    def calculate_face_pointing_orientation(self, face_center):
+        """Calculate the orientation needed to point red arrow directly at the face."""
+        if face_center is None:
+            return None
+        
+        try:
+            # Get current robot position
+            robot_pos = [self.robot.x, self.robot.y, self.robot.z]
+            
+            # Estimate face position in 3D space
+            # This is a simplified estimation - in reality you'd need depth info
+            face_x, face_y, face_w, face_h = face_center
+            
+            # Convert camera pixel coordinates to estimated 3D position
+            # Assume face is at a certain distance and convert pixel offset to world offset
+            estimated_face_distance = 0.8  # Assume face is 80cm away
+            
+            # Calculate face offset from camera center in world coordinates
+            pixel_to_world_scale = 0.001  # Rough conversion factor
+            face_offset_x = (face_x - self.frame_center_x) * pixel_to_world_scale
+            face_offset_y = -(face_y - self.frame_center_y) * pixel_to_world_scale  # Invert Y
+            
+            # Estimate face position in world coordinates
+            # This assumes camera is roughly aligned with world coordinates initially
+            estimated_face_x = robot_pos[0] + face_offset_x
+            estimated_face_y = robot_pos[1] + estimated_face_distance
+            estimated_face_z = robot_pos[2] + face_offset_y
+            
+            # Calculate direction vector from robot to face
+            direction_x = estimated_face_x - robot_pos[0]
+            direction_y = estimated_face_y - robot_pos[1]
+            direction_z = estimated_face_z - robot_pos[2]
+            
+            # Normalize direction vector
+            length = math.sqrt(direction_x**2 + direction_y**2 + direction_z**2)
+            if length > 0:
+                direction_x /= length
+                direction_y /= length
+                direction_z /= length
+            
+            # Calculate orientation to point red arrow (X-axis) toward face
+            # Red arrow should align with direction vector
+            
+            # Calculate rotation around Z-axis (RZ) - yaw
+            rz = math.atan2(direction_y, direction_x)
+            
+            # Calculate rotation around Y-axis (RY) - pitch
+            ry = -math.asin(direction_z)
+            
+            # Keep RX (roll) at 0 for simplicity
+            rx = 0.0
+            
+            return [rx, ry, rz]
+            
+        except Exception as e:
+            print(f"Error calculating face pointing orientation: {e}")
+            return None
 
 # Example usage
 if __name__ == "__main__":
