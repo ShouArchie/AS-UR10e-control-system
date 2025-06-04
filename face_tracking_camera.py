@@ -31,6 +31,20 @@ FACE_BASE_MULTIPLIER = 5.0         # Base joint adjustment for left/right face m
 FACE_SHOULDER_MULTIPLIER = 2.5     # Shoulder joint adjustment for up/down face movement (1.0-4.0, higher = faster)  
 FACE_ELBOW_MULTIPLIER = 2.0        # Elbow joint adjustment for up/down face movement (1.0-3.0, higher = faster)
 
+# PID Controller settings for smooth real-time tracking
+USE_PID_CONTROL = True             # Enable PID control for smooth tracking (True/False)
+PID_KP_X = 0.008                   # Proportional gain for X-axis (left/right) (0.001-0.02)
+PID_KI_X = 0.0002                  # Integral gain for X-axis (0.0001-0.001)  
+PID_KD_X = 0.001                   # Derivative gain for X-axis (0.0005-0.005)
+
+PID_KP_Z = 0.006                   # Proportional gain for Z-axis (up/down) (0.001-0.015)
+PID_KI_Z = 0.0001                  # Integral gain for Z-axis (0.0001-0.001)
+PID_KD_Z = 0.0008                  # Derivative gain for Z-axis (0.0005-0.004)
+
+PID_MAX_OUTPUT = 0.05              # Maximum PID output per update (0.01-0.1)
+PID_INTEGRAL_LIMIT = 0.02          # Limit for integral windup prevention (0.005-0.05)
+PID_UPDATE_RATE = 0.03             # PID update rate in seconds (0.02-0.05, faster = smoother)
+
 # Dead zone settings
 CENTER_DEAD_ZONE_RADIUS = 40      # Circular dead zone around center in pixels (10-50, smaller = more responsive)
 MOVEMENT_DEAD_ZONE = 20           # Linear dead zone for individual movements (5-25, smaller = more responsive)
@@ -51,7 +65,7 @@ class FaceTrackingCamera:
     - Maintains wrist1 joint relationship: 90° + elbow_angle - abs(shoulder_angle)
     """
     
-    def __init__(self, robot_ip=ROBOT_IP, camera_index=0):
+    def __init__(self, robot_ip=ROBOT_IP, camera_index=1):
         """Initialize the face tracking camera system."""
         self.robot = None
         self.robot_ip = robot_ip
@@ -92,6 +106,15 @@ class FaceTrackingCamera:
         self.dead_zone_pixels = MOVEMENT_DEAD_ZONE  # Using configurable dead zone
         # Circular dead zone radius - if face is within this radius of center, no movement commands sent
         self.center_dead_zone_radius = CENTER_DEAD_ZONE_RADIUS  # Using configurable center dead zone
+        
+        # PID Controller state variables for smooth real-time tracking
+        self.pid_error_x_prev = 0.0          # Previous error for X-axis (left/right)
+        self.pid_error_z_prev = 0.0          # Previous error for Z-axis (up/down)
+        self.pid_integral_x = 0.0            # Accumulated error for X-axis
+        self.pid_integral_z = 0.0            # Accumulated error for Z-axis
+        self.pid_last_time = time.time()     # Last PID update time
+        self.pid_target_joints = None        # Target joint positions from PID
+        self.pid_enabled = USE_PID_CONTROL   # PID control enabled flag
         
         # Current robot position
         self.current_pose = None
@@ -354,6 +377,109 @@ class FaceTrackingCamera:
             
         except Exception as e:
             print(f"Error moving robot: {e}")
+    
+    def update_pid_tracking(self, face_center):
+        """Update robot position using PID control for smooth real-time face tracking."""
+        if face_center is None or not self.tracking_active or not self.pid_enabled:
+            return
+        
+        try:
+            # Calculate current time and dt
+            current_time = time.time()
+            dt = current_time - self.pid_last_time
+            
+            # Skip if update rate is too fast
+            if dt < PID_UPDATE_RATE:
+                return
+        
+            face_x, face_y, face_w, face_h = face_center
+            
+            # Calculate normalized errors (-1.0 to 1.0)
+            # Positive error_x = face is to the right, need to move base left
+            # Positive error_z = face is up, need to move shoulder/elbow down
+            error_x = (face_x - self.frame_center_x) / (self.frame_width / 2)
+            error_z = (face_y - self.frame_center_y) / (self.frame_height / 2)
+            
+            # Check if within dead zone (converted to normalized coordinates)
+            error_magnitude = math.sqrt(error_x**2 + error_z**2)
+            dead_zone_normalized = self.center_dead_zone_radius / (self.frame_width / 2)
+            
+            if error_magnitude <= dead_zone_normalized:
+                print(f"PID: Within dead zone (error magnitude: {error_magnitude:.3f})")
+                return
+            
+            # Calculate PID terms for X-axis (left/right)
+            pid_p_x = PID_KP_X * error_x
+            self.pid_integral_x += error_x * dt
+            # Prevent integral windup
+            self.pid_integral_x = max(-PID_INTEGRAL_LIMIT, min(PID_INTEGRAL_LIMIT, self.pid_integral_x))
+            pid_i_x = PID_KI_X * self.pid_integral_x
+            pid_d_x = PID_KD_X * (error_x - self.pid_error_x_prev) / dt if dt > 0 else 0
+            
+            # Calculate PID terms for Z-axis (up/down)
+            pid_p_z = PID_KP_Z * error_z
+            self.pid_integral_z += error_z * dt
+            # Prevent integral windup  
+            self.pid_integral_z = max(-PID_INTEGRAL_LIMIT, min(PID_INTEGRAL_LIMIT, self.pid_integral_z))
+            pid_i_z = PID_KI_Z * self.pid_integral_z
+            pid_d_z = PID_KD_Z * (error_z - self.pid_error_z_prev) / dt if dt > 0 else 0
+            
+            # Calculate total PID outputs
+            pid_output_x = pid_p_x + pid_i_x + pid_d_x
+            pid_output_z = pid_p_z + pid_i_z + pid_d_z
+            
+            # Limit PID outputs
+            pid_output_x = max(-PID_MAX_OUTPUT, min(PID_MAX_OUTPUT, pid_output_x))
+            pid_output_z = max(-PID_MAX_OUTPUT, min(PID_MAX_OUTPUT, pid_output_z))
+            
+            print(f"PID: Error X={error_x:.3f}, Z={error_z:.3f} | Output X={pid_output_x:.4f}, Z={pid_output_z:.4f}")
+            print(f"PID Components X: P={pid_p_x:.4f}, I={pid_i_x:.4f}, D={pid_d_x:.4f}")
+            print(f"PID Components Z: P={pid_p_z:.4f}, I={pid_i_z:.4f}, D={pid_d_z:.4f}")
+            
+            # Get current joint positions
+            current_joints = self.robot.getj()
+            
+            # Calculate smooth target joint adjustments using PID outputs
+            base_adjustment = -pid_output_x * FACE_BASE_MULTIPLIER      # Negative for correct direction
+            shoulder_adjustment = pid_output_z * FACE_SHOULDER_MULTIPLIER  # Up/down control
+            elbow_adjustment = -pid_output_z * FACE_ELBOW_MULTIPLIER      # Opposite for smooth motion
+            
+            # Calculate target joint positions
+            target_base = current_joints[0] + base_adjustment
+            target_shoulder = current_joints[1] + shoulder_adjustment
+            target_elbow = current_joints[2] + elbow_adjustment
+            
+            # Apply wrist formulas
+            shoulder_deg = math.degrees(target_shoulder)
+            elbow_deg = math.degrees(target_elbow)
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            target_wrist1 = math.radians(-wrist1_deg)
+            
+            base_deg = math.degrees(target_base)
+            wrist3_deg = -90 + base_deg
+            target_wrist3 = math.radians(wrist3_deg)
+            
+            # Create smooth target joint positions
+            self.pid_target_joints = [
+                target_base,        # Base
+                target_shoulder,    # Shoulder
+                target_elbow,       # Elbow
+                target_wrist1,      # Wrist 1 (calculated)
+                current_joints[4],  # Wrist 2 (unchanged)
+                target_wrist3       # Wrist 3 (calculated)
+            ]
+            
+            # Send smooth movement command
+            print(f"PID: Sending smooth joint movement...")
+            self.robot.movej(self.pid_target_joints, acc=FACE_TRACKING_ACCELERATION, vel=FACE_TRACKING_VELOCITY)
+            
+            # Update PID state
+            self.pid_error_x_prev = error_x
+            self.pid_error_z_prev = error_z
+            self.pid_last_time = current_time
+            
+        except Exception as e:
+            print(f"Error in PID tracking: {e}")
     
     def update_orientation_to_face(self, face_center):
         """Update robot orientation to point red arrow directly at the face."""

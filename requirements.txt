@@ -1,5 +1,0 @@
-urx
-opencv-python
-numpy
-keyboard
-mediapipe 
