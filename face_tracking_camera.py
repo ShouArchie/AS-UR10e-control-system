@@ -7,6 +7,37 @@ import threading
 import keyboard
 import mediapipe as mp
 
+# ===== CONFIGURATION VARIABLES =====
+# Easy-to-edit settings at the top of the file
+
+# Robot connection settings
+ROBOT_IP = "192.168.0.101"  # Change this to your robot's IP address
+
+# Robot movement speed settings
+FACE_TRACKING_ACCELERATION = 0.5   # Acceleration for face tracking movements (0.1-1.0, higher = faster)
+FACE_TRACKING_VELOCITY = 0.4       # Velocity for face tracking movements (0.05-0.5, higher = faster)
+
+ARROW_KEY_ACCELERATION = 0.3       # Acceleration for arrow key movements (0.1-1.0, higher = faster)  
+ARROW_KEY_VELOCITY = 0.15          # Velocity for arrow key movements (0.05-0.5, higher = faster)
+
+# Movement sensitivity settings
+ARROW_KEY_DISTANCE_STEP = 0.15     # How far each arrow key press moves (0.05-0.3, higher = bigger steps)
+SHOULDER_MULTIPLIER = 1.0          # Shoulder joint adjustment multiplier for arrow keys (0.5-2.0)
+ELBOW_MULTIPLIER = 1.5             # Elbow joint adjustment multiplier for arrow keys (0.5-2.0)
+
+# Face tracking sensitivity settings  
+FACE_TRACKING_SENSITIVITY = 0.015  # How sensitive face tracking is (0.005-0.02, higher = bigger movements)
+FACE_BASE_MULTIPLIER = 5.0         # Base joint adjustment for left/right face movement (2.0-8.0, higher = faster)
+FACE_SHOULDER_MULTIPLIER = 2.5     # Shoulder joint adjustment for up/down face movement (1.0-4.0, higher = faster)  
+FACE_ELBOW_MULTIPLIER = 2.0        # Elbow joint adjustment for up/down face movement (1.0-3.0, higher = faster)
+
+# Dead zone settings
+CENTER_DEAD_ZONE_RADIUS = 40      # Circular dead zone around center in pixels (10-50, smaller = more responsive)
+MOVEMENT_DEAD_ZONE = 20           # Linear dead zone for individual movements (5-25, smaller = more responsive)
+RATE_LIMIT_DELAY = 0.05           # Delay between movement commands in seconds (0.02-0.1, smaller = more frequent)
+
+# ===== END CONFIGURATION =====
+
 class FaceTrackingCamera:
     """
     Face tracking camera system for UR10e robot using Google's MediaPipe.
@@ -20,7 +51,7 @@ class FaceTrackingCamera:
     - Maintains wrist1 joint relationship: 90° + elbow_angle - abs(shoulder_angle)
     """
     
-    def __init__(self, robot_ip="192.168.0.101", camera_index=0):
+    def __init__(self, robot_ip=ROBOT_IP, camera_index=0):
         """Initialize the face tracking camera system."""
         self.robot = None
         self.robot_ip = robot_ip
@@ -41,15 +72,15 @@ class FaceTrackingCamera:
         self.stable_distance = 0.5  # 50cm stable distance from face
         self.current_distance = self.stable_distance
         
-        # Movement parameters - increased for faster response
-        self.movement_sensitivity = 0.005  # Increased for more responsive movement
-        self.max_movement_per_step = 0.02  # Reduced for smoother movement
-        self.movement_smoothing = 0.3  # Reduced for more responsive but smooth movement
+        # Movement parameters - using configuration variables for better responsiveness
+        self.movement_sensitivity = FACE_TRACKING_SENSITIVITY  # Using configurable sensitivity
+        self.max_movement_per_step = 0.05  # Increased from 0.02 for larger steps
+        self.movement_smoothing = 0.2  # Reduced for more responsive movement
         
         # Movement smoothing for better tracking
         self.last_movement = [0.0, 0.0, 0.0]  # Store last movement for smoothing
-        self.movement_filter_strength = 0.7  # Higher = more smoothing
-        self.min_movement_threshold = 0.0005  # Reduced threshold for more responsive movement
+        self.movement_filter_strength = 0.5  # Reduced from 0.7 for less smoothing, more responsiveness
+        self.min_movement_threshold = 0.0003  # Further reduced threshold for more responsive movement
         
         # Camera frame parameters
         self.frame_width = 640
@@ -57,10 +88,10 @@ class FaceTrackingCamera:
         self.frame_center_x = self.frame_width // 2
         self.frame_center_y = self.frame_height // 2
         
-        # Dead zone to prevent jittery movements
-        self.dead_zone_pixels = 15  # Reduced from 20 for more responsive tracking
+        # Dead zone to prevent jittery movements - using configuration variables
+        self.dead_zone_pixels = MOVEMENT_DEAD_ZONE  # Using configurable dead zone
         # Circular dead zone radius - if face is within this radius of center, no movement commands sent
-        self.center_dead_zone_radius = 30  # pixels - adjust this value to change the size of the center dead zone
+        self.center_dead_zone_radius = CENTER_DEAD_ZONE_RADIUS  # Using configurable center dead zone
         
         # Current robot position
         self.current_pose = None
@@ -208,12 +239,32 @@ class FaceTrackingCamera:
         if movement is None or not self.tracking_active:
             return
         
+        # Check if robot is still executing the previous movement command
+        try:
+            if self.robot.is_program_running():
+                # Robot is still moving, skip this update to prevent choppy movement
+                if not hasattr(self, '_movement_skip_counter'):
+                    self._movement_skip_counter = 0
+                self._movement_skip_counter += 1
+                
+                if self._movement_skip_counter % 20 == 0:  # Print every 20th skip
+                    print(f"Waiting for robot to complete previous movement... (skipped {self._movement_skip_counter} updates)")
+                return
+            else:
+                # Reset skip counter when robot is ready for new commands
+                if hasattr(self, '_movement_skip_counter') and self._movement_skip_counter > 0:
+                    print(f"Robot ready for new movement after {self._movement_skip_counter} skipped updates")
+                    self._movement_skip_counter = 0
+        except Exception as e:
+            print(f"Error checking robot program status: {e}")
+            # Continue with movement if we can't check status
+        
         # Rate limiting: only send commands every few frames to prevent choppy movement
         if not hasattr(self, '_last_robot_command_time'):
             self._last_robot_command_time = 0
         
         current_time = time.time()
-        if current_time - self._last_robot_command_time < 0.05:  # Limit to 20 commands per second
+        if current_time - self._last_robot_command_time < RATE_LIMIT_DELAY:  # Using configurable rate limiting
             return
         
         # Check if movement is significant enough to warrant a robot command
@@ -243,10 +294,10 @@ class FaceTrackingCamera:
             # Face left/right (move_x) → Green arrow → Base joint rotation
             # Face up/down (move_z) → Blue arrow → Shoulder/elbow adjustments (FLIPPED)
             
-            # Calculate joint adjustments (increased for more noticeable movement)
-            base_adjustment = move_x * 3.0          # Increased for more noticeable movement
-            shoulder_adjustment = -move_z * 1.5     # Increased for more noticeable movement
-            elbow_adjustment = move_z * 1.2         # Increased for more noticeable movement
+            # Calculate joint adjustments using configurable multipliers for more aggressive tracking
+            base_adjustment = move_x * FACE_BASE_MULTIPLIER          # Using configurable base multiplier (5.0)
+            shoulder_adjustment = -move_z * FACE_SHOULDER_MULTIPLIER  # Using configurable shoulder multiplier (2.5)
+            elbow_adjustment = move_z * FACE_ELBOW_MULTIPLIER         # Using configurable elbow multiplier (2.0)
             
             print(f"Joint adjustments (degrees): Base={math.degrees(base_adjustment):.3f}°, Shoulder={math.degrees(shoulder_adjustment):.3f}°, Elbow={math.degrees(elbow_adjustment):.3f}°")
             
@@ -292,8 +343,9 @@ class FaceTrackingCamera:
             print(f"Joint adjustments: Base: {math.degrees(base_adjustment):.2f}°, Shoulder: {math.degrees(shoulder_adjustment):.2f}°, Elbow: {math.degrees(elbow_adjustment):.2f}°")
             
             # Use movej to maintain exact joint relationships and prevent unwanted rotations
-            print(f"Sending movej command with acc=0.8, vel=0.3...")
-            self.robot.movej(new_joints, acc=0.8, vel=0.3)  # Increased speed for more responsive movement
+            # Using configurable acceleration and velocity for face tracking movements
+            print(f"Sending movej command with acc={FACE_TRACKING_ACCELERATION}, vel={FACE_TRACKING_VELOCITY}...")
+            self.robot.movej(new_joints, acc=FACE_TRACKING_ACCELERATION, vel=FACE_TRACKING_VELOCITY)
             
             # Update the last command time
             self._last_robot_command_time = current_time
@@ -344,12 +396,12 @@ class FaceTrackingCamera:
         while self.running:
             try:
                 if keyboard.is_pressed('up'):
-                    # Move back along red arrow (away from user)
-                    self.adjust_distance(0.03)  # Positive = move back/away
+                    # Move back along red arrow (away from user) - using configurable distance step
+                    self.adjust_distance(ARROW_KEY_DISTANCE_STEP)  # Positive = move back/away
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 elif keyboard.is_pressed('down'):
-                    # Move forward along red arrow (toward user)
-                    self.adjust_distance(-0.03)  # Negative = move forward/closer
+                    # Move forward along red arrow (toward user) - using configurable distance step
+                    self.adjust_distance(-ARROW_KEY_DISTANCE_STEP)  # Negative = move forward/closer
                     time.sleep(0.08)  # Reduced delay for more responsive control
                 else:
                     time.sleep(0.05)
@@ -360,6 +412,16 @@ class FaceTrackingCamera:
     def adjust_distance(self, distance_change):
         """Adjust the distance using joint-based movement to preserve the wrist1 and wrist3 relationship formulas."""
         try:
+            # Check if robot is still executing the previous movement command
+            try:
+                if self.robot.is_program_running():
+                    # Robot is still moving, skip this command to prevent choppy movement
+                    print("Robot still moving, waiting for completion before distance adjustment...")
+                    return
+            except Exception as e:
+                print(f"Error checking robot program status: {e}")
+                # Continue with movement if we can't check status
+            
             # Get current joint positions to maintain relationships
             current_joints = self.robot.getj()
             print(f"Current joints before movement: {[f'{math.degrees(j):.1f}°' for j in current_joints]}")
@@ -377,8 +439,8 @@ class FaceTrackingCamera:
             
             # Calculate movement adjustments for forward/back motion
             # Positive distance_change = move away, negative = move closer
-            shoulder_adjustment = distance_change * 0.3  # Adjust shoulder angle
-            elbow_adjustment = -distance_change * 0.5    # Opposite elbow adjustment for smooth motion
+            shoulder_adjustment = distance_change * SHOULDER_MULTIPLIER  # Using configurable shoulder multiplier
+            elbow_adjustment = -distance_change * ELBOW_MULTIPLIER       # Using configurable elbow multiplier
             
             # Calculate new joint angles
             new_shoulder_angle = shoulder_angle + shoulder_adjustment
@@ -412,7 +474,8 @@ class FaceTrackingCamera:
             print(f"New joints: {[f'{math.degrees(j):.1f}°' for j in new_joints]}")
             
             # Use movej to maintain exact joint relationships and prevent unwanted rotations
-            self.robot.movej(new_joints, acc=0.3, vel=0.15)
+            # Using configurable acceleration and velocity for arrow key movements
+            self.robot.movej(new_joints, acc=ARROW_KEY_ACCELERATION, vel=ARROW_KEY_VELOCITY)
             
             direction = "closer" if distance_change < 0 else "further"
             print(f"Moving {direction} using joint-based movement - preserving wrist1 and wrist3 relationships")
@@ -600,7 +663,7 @@ class FaceTrackingCamera:
             estimated_face_distance = 0.8  # Assume face is 80cm away
             
             # Calculate face offset from camera center in world coordinates
-            pixel_to_world_scale = 0.005  # Rough conversion factor
+            pixel_to_world_scale = 15  # Rough conversion factor ARCHIEEDIT
             face_offset_x = (face_x - self.frame_center_x) * pixel_to_world_scale
             face_offset_y = -(face_y - self.frame_center_y) * pixel_to_world_scale  # Invert Y
             
