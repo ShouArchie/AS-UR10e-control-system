@@ -10,9 +10,9 @@ import keyboard
 # ===============================================
 # SIMPLE CONFIGURATION
 # ===============================================
-ROBOT_IP = "192.168.0.101"
-CAMERA_INDEX = 1
-FACE_SENSITIVITY = 0.01  # Movement sensitivity
+ROBOT_IP = "192.168.10.223"
+CAMERA_INDEX = 0
+FACE_SENSITIVITY = 0.002  # Made smaller for more precise tracking
 
 # ===============================================
 # SIMPLE FACE TRACKER
@@ -75,6 +75,10 @@ class SimpleFaceTracker:
         # Face detection
         self.mp_face = mp.solutions.face_detection
         self.face_detection = self.mp_face.FaceDetection(min_detection_confidence=0.5)
+        
+        # --- Moving average filter state ---
+        self.face_history = []  # List of (timestamp, x, y)
+        self.filter_window = 1.0  # seconds for moving average
     
     def connect_robot(self):
         """Connect to robot."""
@@ -122,22 +126,23 @@ class SimpleFaceTracker:
             return False
     
     def _servoj_loop(self):
-        """Continuous servoj loop - sends commands every 0.016 seconds."""
+        """Continuous servoj loop - sends commands every 0.016 seconds (60Hz)."""
         while self.servoj_running:
             try:
-                # Create servoj command with dynamic parameters
+                # Only send commands if tracking is active
+                if not self.tracking_active:
+                    time.sleep(0.016)
+                    continue  # Skip sending commands when paused
+                # Use even slower parameters for gentler motion
+                # t=0.1, lookahead_time=0.8, a=0.1, v=0.2, gain is variable
                 cmd = (f"servoj([{self.target_joints[0]:.6f}, {self.target_joints[1]:.6f}, "
                        f"{self.target_joints[2]:.6f}, {self.target_joints[3]:.6f}, "
                        f"{self.target_joints[4]:.6f}, {self.target_joints[5]:.6f}], "
-                       f"a={self.current_a:.2f}, v={self.current_v:.2f}, t={self.current_t:.3f}, "
-                       f"lookahead_time={self.current_lookahead:.2f}, gain={self.current_gain})")
-                
+                       f"a=0.1, v=0.2, t=0.1, lookahead_time=0.8, gain={self.current_gain})  # Slowed for gentle trailing motion")
                 # Send command
                 self.robot.send_program(cmd)
-                
-                # Match camera fps (~60Hz)
+                # Send commands at 60Hz
                 time.sleep(0.016)
-                
             except Exception as e:
                 if self.servoj_running:
                     print(f"ServoJ error: {e}")
@@ -186,67 +191,53 @@ class SimpleFaceTracker:
             return [0.0] * 6
     
     def update_target(self, face_x, face_y):
-        """Update target joints based on face position."""
+        """Update target joints based on face position with 1s moving average filter."""
         if not self.tracking_active:
             return
-        
         try:
-            # Detect sudden movements
-            face_movement = math.sqrt((face_x - self.previous_face_x)**2 + (face_y - self.previous_face_y)**2)
-            is_sudden_movement = face_movement > self.sudden_movement_threshold
-            
-            # Apply movement smoothing for sudden movements
-            if is_sudden_movement:
-                # Smooth the face position to reduce choppiness
-                smoothed_face_x = self.previous_face_x + (face_x - self.previous_face_x) * (1 - self.movement_smoothing_factor)
-                smoothed_face_y = self.previous_face_y + (face_y - self.previous_face_y) * (1 - self.movement_smoothing_factor)
+            now = time.time()
+            # Add current face position to history
+            self.face_history.append((now, face_x, face_y))
+            # Remove old entries outside the filter window
+            self.face_history = [(t, x, y) for (t, x, y) in self.face_history if now - t <= self.filter_window]
+            # Compute average face position over the last 1s
+            if len(self.face_history) > 0:
+                avg_x = sum(x for (_, x, _) in self.face_history) / len(self.face_history)
+                avg_y = sum(y for (_, _, y) in self.face_history) / len(self.face_history)
             else:
-                smoothed_face_x = face_x
-                smoothed_face_y = face_y
-            
+                avg_x, avg_y = face_x, face_y
+            # Use the averaged position for all further calculations
+            smoothed_face_x = avg_x
+            smoothed_face_y = avg_y
             # Calculate face offset from center using smoothed position
             offset_x = smoothed_face_x - self.center_x
             offset_y = smoothed_face_y - self.center_y
-            
             # Check if face is within deadzone - if so, don't move robot
             distance_from_center = math.sqrt(offset_x**2 + offset_y**2)
             if distance_from_center <= self.deadzone_radius:
-                # Face is centered - don't move robot, just update previous position
                 self.previous_face_x = face_x
                 self.previous_face_y = face_y
                 return
-            
-            # Convert to movement increments - CONSTRAINED TO X-Y ONLY
+            # Face tracking controls left/right (base joint) and up/down (shoulder), not forward/backward (elbow)
             base_move = -offset_x * FACE_SENSITIVITY / 100  # Left/right movement (X-axis)
-            shoulder_move = offset_y * FACE_SENSITIVITY / 100   # Up/down movement (Y-axis) - FIXED SIGN
-            # NO elbow movement during face tracking to prevent Z-axis drift
-            
-            # Update target joints - FACE TRACKING ONLY AFFECTS BASE AND SHOULDER
+            shoulder_move = offset_y * FACE_SENSITIVITY / 100   # Up/down movement (Y-axis)
             self.target_joints[0] += base_move      # Base (left/right)
             self.target_joints[1] += shoulder_move  # Shoulder (up/down)
-            # Elbow stays fixed during face tracking - only arrow keys can change Z-depth
-            
-            # Calculate wrist relationships
+            # Elbow (joint 2) is only changed by arrow keys (forward/backward extension)
+            # Calculate wrist relationships using correct formulas
             shoulder_deg = math.degrees(self.target_joints[1])
             elbow_deg = math.degrees(self.target_joints[2])
             base_deg = math.degrees(self.target_joints[0])
-            
-            # Wrist formulas (keep end-effector orientation consistent)
-            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            # Correct wrist formulas:
+            # wrist1 = 90° + elbow_angle - abs(shoulder_angle)
+            # wrist3 = -90° + base_angle
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)  # Corrected: no base component
             wrist3_deg = -90 + base_deg
-            
             self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
             self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
-            
-            # Update dynamic control parameters (focus on distance-based lookahead)
-            self.current_face_x = smoothed_face_x
-            self.current_face_y = smoothed_face_y
-            self.current_t, self.current_a, self.current_v, self.current_lookahead, self.current_gain = self.calculate_dynamic_t(smoothed_face_x, smoothed_face_y, is_sudden_movement)
-            
-            # Update previous position for next iteration
+            # Only gain remains variable
             self.previous_face_x = face_x
             self.previous_face_y = face_y
-            
         except Exception as e:
             print(f"Update error: {e}")
     
@@ -277,22 +268,56 @@ class SimpleFaceTracker:
             return None
     
     def handle_arrow_keys(self):
-        """Handle arrow key presses for Z-direction movement."""
+        """Handle arrow key presses for forward/backward extension (elbow joint)."""
         while self.running:
             try:
                 if keyboard.is_pressed('up'):
-                    # UP arrow: Move backward in Z (away from camera)
-                    self.adjust_z_position(-self.z_step)
+                    # UP arrow: Increase forward extension (elbow joint)
+                    self.target_joints[2] += 0.01  # Small increment for elbow joint
+                    print("Arrow UP: Increasing forward extension (elbow joint)")
                     time.sleep(0.1)  # Prevent too rapid movement
                 elif keyboard.is_pressed('down'):
-                    # DOWN arrow: Move forward in Z (toward camera)
-                    self.adjust_z_position(self.z_step)
+                    # DOWN arrow: Decrease forward extension (elbow joint)
+                    self.target_joints[2] -= 0.01  # Small decrement for elbow joint
+                    print("Arrow DOWN: Decreasing forward extension (elbow joint)")
                     time.sleep(0.1)
                 else:
                     time.sleep(0.05)  # Check keys regularly
             except Exception as e:
                 print(f"Arrow key error: {e}")
                 time.sleep(0.1)
+    
+    def adjust_forward_backward(self, x_change):
+        """Adjust robot forward/backward by moving in X direction while maintaining wrist relationships."""
+        try:
+            # Get current joint positions
+            current_joints = self.robot.getj()
+            
+            # X movement primarily affects shoulder and elbow joints
+            # Positive x_change = move forward, negative = move backward
+            shoulder_adjustment = x_change * 0.5  # Shoulder adjustment
+            elbow_adjustment = -x_change * 0.8    # Elbow compensation
+            
+            # Update target joints for forward/backward movement
+            self.target_joints[1] += shoulder_adjustment  # Shoulder
+            self.target_joints[2] += elbow_adjustment     # Elbow
+            
+            # Recalculate wrist relationships using correct formulas
+            shoulder_deg = math.degrees(self.target_joints[1])
+            elbow_deg = math.degrees(self.target_joints[2])
+            base_deg = math.degrees(self.target_joints[0])
+            
+            # Apply correct wrist formulas
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            wrist3_deg = -90 + base_deg
+            
+            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
+            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
+            
+            print(f"Forward/backward adjustment: X={x_change*1000:.0f}mm, Shoulder={math.degrees(shoulder_adjustment):.2f}°, Elbow={math.degrees(elbow_adjustment):.2f}°")
+            
+        except Exception as e:
+            print(f"Forward/backward adjustment error: {e}")
     
     def adjust_z_position(self, z_change):
         """Adjust robot position in Z direction (forward/backward)."""
@@ -345,36 +370,37 @@ class SimpleFaceTracker:
             # Adjust parameters for sudden movements
             if is_sudden_movement:
                 # For sudden movements: moderate parameters
-                min_t = 0.8
-                max_t = 1.2
-                min_a = 0.2
-                max_a = 0.5
-                min_v = 0.3
-                max_v = 0.6
-                # Higher lookahead for much smoother motion when far from center
+                min_t = 0.016  # Match command frequency (60Hz)
+                max_t = 0.016  # Always match command frequency
+                min_a = 0.3    # Low acceleration near center
+                max_a = 1.3    # High acceleration far from center
+                min_v = 0.3    # Low velocity near center
+                max_v = 1.5    # High velocity far from center
                 min_lookahead = 1.0
-                max_lookahead = 3.0  # Very high lookahead when suddenly far out
-                min_gain = 300
-                max_gain = 500
+                max_lookahead = 3.0
+                min_gain = 200
+                max_gain = 700
             else:
                 # Normal parameters for regular tracking
-                min_t = 0.5
-                max_t = 0.9
-                min_a = 0.2
-                max_a = 0.8
+                min_t = 0.016  # Match command frequency (60Hz)
+                max_t = 0.016  # Always match command frequency
+                min_a = 0.3
+                max_a = 1.3
                 min_v = 0.3
-                max_v = 0.8
-                # Higher lookahead when far from center for smooth motion
+                max_v = 1.5
                 min_lookahead = 0.2
-                max_lookahead = 1.5  # Increased from 0.3 to 1.5
+                max_lookahead = 1.5
                 min_gain = 200
-                max_gain = 400
+                max_gain = 700
             
-            dynamic_t = min_t + (max_t - min_t) * decay_factor
+            # Set gain to a constant low value for extra smooth, non-aggressive motion
+            dynamic_gain = 100
+            # Interpolate acceleration and velocity: low near center, high far from center
             dynamic_a = min_a + (max_a - min_a) * decay_factor
             dynamic_v = min_v + (max_v - min_v) * decay_factor
+            # t is always the command period (0.016s)
+            dynamic_t = min_t  # or max_t, both are 0.016
             dynamic_lookahead = min_lookahead + (max_lookahead - min_lookahead) * decay_factor
-            dynamic_gain = int(min_gain + (max_gain - min_gain) * decay_factor)
             
             return dynamic_t, dynamic_a, dynamic_v, dynamic_lookahead, dynamic_gain
             
@@ -549,7 +575,7 @@ class SimpleFaceTracker:
 # ===============================================
 # MAIN EXECUTION
 # ===============================================
-
+# Moving average box car
 if __name__ == "__main__":
     tracker = SimpleFaceTracker()
     try:
@@ -560,3 +586,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {e}")
         tracker.cleanup() 
+
+
+
