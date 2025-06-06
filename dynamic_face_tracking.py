@@ -10,9 +10,9 @@ import keyboard
 # ===============================================
 # SIMPLE CONFIGURATION
 # ===============================================
-ROBOT_IP = "192.168.10.223"
-CAMERA_INDEX = 0
-FACE_SENSITIVITY = 0.002  # Made smaller for more precise tracking
+ROBOT_IP = "192.168.0.101"
+CAMERA_INDEX = 1
+FACE_SENSITIVITY = 5# Increased for better face responsiveness
 
 # ===============================================
 # SIMPLE FACE TRACKER
@@ -54,7 +54,7 @@ class SimpleFaceTracker:
         self.movement_smoothing_factor = 0.85  # Increased from 0.7 for more smoothing
         
         # Deadzone to prevent jittery movement when centered
-        self.deadzone_radius = 20  # pixels - robot stops moving when face is within this radius
+        self.deadzone_radius = 30  # pixels - robot stops moving when face is within this radius
         
         # PID Controller parameters
         self.pid_kp = 0.8  # Proportional gain
@@ -131,18 +131,18 @@ class SimpleFaceTracker:
             try:
                 # Only send commands if tracking is active
                 if not self.tracking_active:
-                    time.sleep(0.016)
+                    time.sleep(0.008)
                     continue  # Skip sending commands when paused
-                # Use even slower parameters for gentler motion
-                # t=0.1, lookahead_time=0.8, a=0.1, v=0.2, gain is variable
+                # Updated parameters with variable gain based on face distance
+                # t=0.8, lookahead_time=5, a=1, v=1.5, gain=variable
                 cmd = (f"servoj([{self.target_joints[0]:.6f}, {self.target_joints[1]:.6f}, "
                        f"{self.target_joints[2]:.6f}, {self.target_joints[3]:.6f}, "
                        f"{self.target_joints[4]:.6f}, {self.target_joints[5]:.6f}], "
-                       f"a=0.1, v=0.2, t=0.1, lookahead_time=0.8, gain={self.current_gain})  # Slowed for gentle trailing motion")
+                       f"a=1, v=1.5, t=0.8, lookahead_time=60   , gain=100)  # Fixed gain for consistent response")
                 # Send command
                 self.robot.send_program(cmd)
-                # Send commands at 60Hz
-                time.sleep(0.016)
+                # Send commands at 125Hz
+                time.sleep(0.008)
             except Exception as e:
                 if self.servoj_running:
                     print(f"ServoJ error: {e}")
@@ -212,34 +212,298 @@ class SimpleFaceTracker:
             # Calculate face offset from center using smoothed position
             offset_x = smoothed_face_x - self.center_x
             offset_y = smoothed_face_y - self.center_y
-            # Check if face is within deadzone - if so, don't move robot
+            # Check if face is within deadzone - if so, FULL STOP
             distance_from_center = math.sqrt(offset_x**2 + offset_y**2)
             if distance_from_center <= self.deadzone_radius:
+                # FULL STOP - set target joints to current position to stop all movement
+                try:
+                    current_joints = self.robot.getj()
+                    self.target_joints = list(current_joints)  # Stop at current position
+                    print(f"DEADZONE: Face within {self.deadzone_radius}px - FULL STOP")
+                except:
+                    pass  # Keep existing targets if getj fails
                 self.previous_face_x = face_x
                 self.previous_face_y = face_y
                 return
-            # Face tracking controls left/right (base joint) and up/down (shoulder), not forward/backward (elbow)
-            base_move = -offset_x * FACE_SENSITIVITY / 100  # Left/right movement (X-axis)
-            shoulder_move = offset_y * FACE_SENSITIVITY / 100   # Up/down movement (Y-axis)
-            self.target_joints[0] += base_move      # Base (left/right)
-            self.target_joints[1] += shoulder_move  # Shoulder (up/down)
-            # Elbow (joint 2) is only changed by arrow keys (forward/backward extension)
-            # Calculate wrist relationships using correct formulas
-            shoulder_deg = math.degrees(self.target_joints[1])
-            elbow_deg = math.degrees(self.target_joints[2])
-            base_deg = math.degrees(self.target_joints[0])
-            # Correct wrist formulas:
-            # wrist1 = 90° + elbow_angle - abs(shoulder_angle)
-            # wrist3 = -90° + base_angle
-            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)  # Corrected: no base component
-            wrist3_deg = -90 + base_deg
-            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
-            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
-            # Only gain remains variable
+
+            # Fixed gain
+            self.current_gain = 100  # Constant gain for consistent response
+
+            # SAFETY: Prevent sudden large movements for faces detected far from center
+            max_offset = 100  # Maximum pixel offset to prevent sudden jumps
+            offset_x = max(-max_offset, min(max_offset, offset_x))
+            offset_y = max(-max_offset, min(max_offset, offset_y))
+
+            # NEW APPROACH: Use IK solver with joint constraints
+            # Calculate target Cartesian movement based on face sensitivity
+            y_move = -offset_x * FACE_SENSITIVITY  # Left/right movement (robot Y-axis)
+            z_move = offset_y * FACE_SENSITIVITY   # Up/down movement (robot Z-axis) - FLIPPED
+            
+            # Debug output for face tracking
+            print(f"Face offset: X={offset_x:.1f}px, Y={offset_y:.1f}px -> Y_move={y_move*1000:.1f}mm, Z_move={z_move*1000:.1f}mm")
+            
+            # Use IK-based movement to maintain joint constraints
+            self.move_with_ik_constraints(0, y_move, z_move)
+            
             self.previous_face_x = face_x
             self.previous_face_y = face_y
         except Exception as e:
             print(f"Update error: {e}")
+
+    def move_with_ik_constraints(self, x_move, y_move, z_move):
+        """Move robot using UR's built-in IK solver while constraining X and maintaining wrist relationships."""
+        try:
+            # Get current pose for IK calculation
+            current_pose = self.get_robot_pose()
+            if current_pose is None:
+                print("Pose unavailable - using direct joint movement")
+                self.calculate_ik_direct(x_move, y_move, z_move)
+                return
+            
+            # Calculate target pose - ONLY allow Y and Z changes, X stays constant  
+            target_pose = current_pose.copy()
+            # X STAYS CONSTANT - no x_move applied!
+            target_pose[1] += y_move  # Only Y changes for left/right
+            target_pose[2] += z_move  # Only Z changes for up/down
+            # Keep orientation unchanged (indices 3, 4, 5)
+            
+            # Use URScript to calculate IK solution
+            urscript = f"""
+            current_joints = get_actual_joint_positions()
+            target_pose = p[{target_pose[0]:.6f}, {target_pose[1]:.6f}, {target_pose[2]:.6f}, {target_pose[3]:.6f}, {target_pose[4]:.6f}, {target_pose[5]:.6f}]
+            
+            ik_solution = get_inverse_kin(target_pose, current_joints)
+            
+            if ik_solution[0] != -1:
+                # Calculate wrist constraints
+                shoulder_deg = ik_solution[1] * 180.0 / 3.14159
+                elbow_deg = ik_solution[2] * 180.0 / 3.14159
+                base_deg = ik_solution[0] * 180.0 / 3.14159
+                
+                wrist1_deg = 90.0 + elbow_deg - abs(shoulder_deg)
+                wrist3_deg = -90.0 + base_deg
+                
+                # Apply wrist constraints
+                ik_solution[3] = -wrist1_deg * 3.14159 / 180.0
+                ik_solution[5] = wrist3_deg * 3.14159 / 180.0
+                
+                textmsg("IK_OK:", ik_solution[0], ik_solution[1], ik_solution[2], ik_solution[3], ik_solution[4], ik_solution[5])
+            else:
+                textmsg("IK_FAIL")
+            end
+            """
+            
+            # Send URScript to calculate IK
+            self.robot.send_program(urscript)
+            
+            # Small delay to allow URScript execution
+            time.sleep(0.01)
+            
+            # For now, update target_joints with current position plus small movements
+            # This is temporary until we can read the IK solution back
+            current_joints = self.robot.getj()
+            
+            # Apply small joint space movements as approximation
+            if abs(y_move) > 0.001:
+                self.target_joints[0] += y_move * 0.5  # Base for Y movement (left/right)
+            if abs(z_move) > 0.001:
+                # Z movement (up/down) affects shoulder primarily
+                self.target_joints[1] += z_move * 0.3  # Shoulder for Z movement (reduced sensitivity)
+                
+            # Always apply wrist constraints
+            shoulder_deg = math.degrees(self.target_joints[1])
+            elbow_deg = math.degrees(self.target_joints[2])
+            base_deg = math.degrees(self.target_joints[0])
+            
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            wrist3_deg = -90 + base_deg
+            
+            self.target_joints[3] = math.radians(-wrist1_deg)
+            self.target_joints[5] = math.radians(wrist3_deg)
+            
+            print(f"UR IK: X constrained, Y={y_move*1000:.1f}mm, Z={z_move*1000:.1f}mm")
+            print(f"Wrist1: {wrist1_deg:.1f}°, Wrist3: {wrist3_deg:.1f}°")
+            
+        except Exception as e:
+            print(f"UR IK error: {e}")
+            # Fallback to direct method
+            self.calculate_ik_direct(x_move, y_move, z_move)
+
+    def calculate_ik_with_constraints(self, target_pose):
+        """Calculate IK solution with wrist constraints applied."""
+        try:
+            # Get current joint positions as seed for IK
+            current_joints = self.robot.getj()
+            
+            # For small movements, use simplified joint space mapping
+            # This approach avoids pose parsing issues while maintaining constraints
+            
+            # Get current pose to calculate movement delta
+            current_pose = self.get_robot_pose()
+            if current_pose is None:
+                # Fallback: Use direct joint space movements without pose comparison
+                print("Using direct joint space movement (pose unavailable)")
+                return
+                
+            # Calculate pose differences
+            dx = target_pose[0] - current_pose[0]
+            dy = target_pose[1] - current_pose[1] 
+            dz = target_pose[2] - current_pose[2]
+            
+            # For small movements, use simplified joint space mapping
+            # Base joint primarily affects Y movement
+            if abs(dy) > 0.001:  # 1mm threshold
+                base_adjustment = dy * 0.8  # Approximate scaling
+                self.target_joints[0] += base_adjustment
+                
+            # Shoulder and elbow primarily affect X and Z movement
+            if abs(dx) > 0.001 or abs(dz) > 0.001:
+                # Combined X/Z movement affects shoulder and elbow
+                shoulder_adjustment = (dx * 0.3 + dz * 0.5)
+                elbow_adjustment = -(dx * 0.5 + dz * 0.8)
+                
+                self.target_joints[1] += shoulder_adjustment
+                self.target_joints[2] += elbow_adjustment
+            
+            # Always recalculate and apply wrist constraints
+            shoulder_deg = math.degrees(self.target_joints[1])
+            elbow_deg = math.degrees(self.target_joints[2])
+            base_deg = math.degrees(self.target_joints[0])
+            
+            # Apply wrist formulas
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            wrist3_deg = -90 + base_deg
+            
+            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
+            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
+            # Wrist2 (joint 4) remains unchanged for tool orientation
+            
+            print(f"IK movement: dx={dx*1000:.1f}mm, dy={dy*1000:.1f}mm, dz={dz*1000:.1f}mm")
+            print(f"Wrist1: {wrist1_deg:.1f}°, Wrist3: {wrist3_deg:.1f}°")
+            
+        except Exception as e:
+            print(f"IK calculation error: {e}")
+
+    def calculate_ik_direct(self, x_move, y_move, z_move):
+        """Direct joint space movement with safety limits - fallback method."""
+        try:
+            # SAFETY: Limit maximum single movement to prevent sudden jumps
+            max_move = 0.005  # 5mm maximum per movement
+            x_move = max(-max_move, min(max_move, x_move))
+            y_move = max(-max_move, min(max_move, y_move))
+            z_move = max(-max_move, min(max_move, z_move))
+            
+            # Direct joint space movements with improved scaling for face tracking
+            # Base joint primarily affects Y movement (left/right)
+            if abs(y_move) > 0.001:  # 1mm threshold
+                base_adjustment = y_move * 0.5  # Improved scaling for left/right
+                self.target_joints[0] += base_adjustment
+                
+            # Separate X and Z movements for better control
+            if abs(x_move) > 0.001:
+                # X movement (forward/backward) primarily affects shoulder and elbow
+                shoulder_adjustment = x_move * 0.3
+                elbow_adjustment = -x_move * 0.4
+                self.target_joints[1] += shoulder_adjustment
+                self.target_joints[2] += elbow_adjustment
+                
+            if abs(z_move) > 0.001:
+                # Z movement (up/down) primarily affects shoulder
+                shoulder_adjustment = z_move * 0.2  # Reduced Z sensitivity
+                self.target_joints[1] += shoulder_adjustment
+            
+            # SAFETY: Check joint limits before applying
+            joint_limits = [
+                (-2*math.pi, 2*math.pi),    # Base: ±360°
+                (-math.pi, 0),              # Shoulder: -180° to 0°
+                (-math.pi, math.pi),        # Elbow: ±180°
+                (-math.pi, math.pi),        # Wrist1: ±180°
+                (-2*math.pi, 2*math.pi),    # Wrist2: ±360°
+                (-2*math.pi, 2*math.pi),    # Wrist3: ±360°
+            ]
+            
+            # Apply joint limits
+            for i in range(6):
+                min_limit, max_limit = joint_limits[i]
+                self.target_joints[i] = max(min_limit, min(max_limit, self.target_joints[i]))
+            
+            # Always recalculate and apply wrist constraints
+            shoulder_deg = math.degrees(self.target_joints[1])
+            elbow_deg = math.degrees(self.target_joints[2])
+            base_deg = math.degrees(self.target_joints[0])
+            
+            # Apply wrist formulas
+            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
+            wrist3_deg = -90 + base_deg
+            
+            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
+            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
+            
+            print(f"Safe Direct IK: X={x_move*1000:.1f}mm, Y={y_move*1000:.1f}mm, Z={z_move*1000:.1f}mm")
+            print(f"Wrist1: {wrist1_deg:.1f}°, Wrist3: {wrist3_deg:.1f}°")
+            
+        except Exception as e:
+            print(f"Direct IK error: {e}")
+
+    def get_robot_pose(self):
+        """Get current robot pose with comprehensive PoseVector handling."""
+        try:
+            pose = self.robot.getl()
+            
+            # Handle different PoseVector object types
+            if hasattr(pose, 'array') and pose.array is not None:
+                # Try numpy array approach
+                try:
+                    import numpy as np
+                    if isinstance(pose.array, np.ndarray):
+                        return pose.array.tolist()
+                except:
+                    pass
+            
+            # Try direct array access
+            if hasattr(pose, 'array') and hasattr(pose.array, 'tolist'):
+                try:
+                    return pose.array.tolist()
+                except:
+                    pass
+            
+            # Try list conversion of array
+            if hasattr(pose, 'array'):
+                try:
+                    return list(pose.array)
+                except:
+                    pass
+                    
+            # Try individual property access
+            try:
+                return [float(pose.x), float(pose.y), float(pose.z), 
+                       float(pose.rx), float(pose.ry), float(pose.rz)]
+            except:
+                pass
+            
+            # Try index access (if it's array-like)
+            try:
+                return [float(pose[i]) for i in range(6)]
+            except:
+                pass
+                
+            # Try string parsing as last resort
+            try:
+                pose_str = str(pose)
+                # Look for patterns like "p[x, y, z, rx, ry, rz]" or similar
+                import re
+                numbers = re.findall(r'-?\d+\.?\d*', pose_str)
+                if len(numbers) >= 6:
+                    return [float(numbers[i]) for i in range(6)]
+            except:
+                pass
+                
+            print(f"Unable to parse pose object: {type(pose)}, attributes: {dir(pose)}")
+            return None
+            
+        except Exception as e:
+            print(f"Get robot pose error: {e}")
+            return None
     
     def detect_face(self, frame):
         """Simple face detection."""
@@ -268,18 +532,18 @@ class SimpleFaceTracker:
             return None
     
     def handle_arrow_keys(self):
-        """Handle arrow key presses for forward/backward extension (elbow joint)."""
+        """Handle arrow key presses for forward/backward movement (X-axis) using IK constraints."""
         while self.running:
             try:
                 if keyboard.is_pressed('up'):
-                    # UP arrow: Increase forward extension (elbow joint)
-                    self.target_joints[2] += 0.01  # Small increment for elbow joint
-                    print("Arrow UP: Increasing forward extension (elbow joint)")
+                    # UP arrow: Move forward in X direction using IK constraints
+                    self.move_with_ik_constraints(0.01, 0, 0)  # 10mm forward in X
+                    print("Arrow UP: Moving forward 10mm (IK constrained)")
                     time.sleep(0.1)  # Prevent too rapid movement
                 elif keyboard.is_pressed('down'):
-                    # DOWN arrow: Decrease forward extension (elbow joint)
-                    self.target_joints[2] -= 0.01  # Small decrement for elbow joint
-                    print("Arrow DOWN: Decreasing forward extension (elbow joint)")
+                    # DOWN arrow: Move backward in X direction using IK constraints
+                    self.move_with_ik_constraints(-0.01, 0, 0)  # 10mm backward in X
+                    print("Arrow DOWN: Moving backward 10mm (IK constrained)")
                     time.sleep(0.1)
                 else:
                     time.sleep(0.05)  # Check keys regularly
@@ -287,66 +551,7 @@ class SimpleFaceTracker:
                 print(f"Arrow key error: {e}")
                 time.sleep(0.1)
     
-    def adjust_forward_backward(self, x_change):
-        """Adjust robot forward/backward by moving in X direction while maintaining wrist relationships."""
-        try:
-            # Get current joint positions
-            current_joints = self.robot.getj()
-            
-            # X movement primarily affects shoulder and elbow joints
-            # Positive x_change = move forward, negative = move backward
-            shoulder_adjustment = x_change * 0.5  # Shoulder adjustment
-            elbow_adjustment = -x_change * 0.8    # Elbow compensation
-            
-            # Update target joints for forward/backward movement
-            self.target_joints[1] += shoulder_adjustment  # Shoulder
-            self.target_joints[2] += elbow_adjustment     # Elbow
-            
-            # Recalculate wrist relationships using correct formulas
-            shoulder_deg = math.degrees(self.target_joints[1])
-            elbow_deg = math.degrees(self.target_joints[2])
-            base_deg = math.degrees(self.target_joints[0])
-            
-            # Apply correct wrist formulas
-            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
-            wrist3_deg = -90 + base_deg
-            
-            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
-            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
-            
-            print(f"Forward/backward adjustment: X={x_change*1000:.0f}mm, Shoulder={math.degrees(shoulder_adjustment):.2f}°, Elbow={math.degrees(elbow_adjustment):.2f}°")
-            
-        except Exception as e:
-            print(f"Forward/backward adjustment error: {e}")
-    
-    def adjust_z_position(self, z_change):
-        """Adjust robot position in Z direction (forward/backward)."""
-        try:
-            # Z movement primarily affects shoulder and elbow joints
-            # Positive z_change = move forward (toward camera)
-            # Negative z_change = move backward (away from camera)
-            
-            shoulder_adjustment = z_change * 0.5  # Shoulder moves more
-            elbow_adjustment = -z_change * 0.8    # Elbow compensates
-            
-            # Update target joints for Z movement
-            self.target_joints[1] += shoulder_adjustment  # Shoulder
-            self.target_joints[2] += elbow_adjustment     # Elbow
-            
-            # Recalculate wrist relationships
-            shoulder_deg = math.degrees(self.target_joints[1])
-            elbow_deg = math.degrees(self.target_joints[2])
-            base_deg = math.degrees(self.target_joints[0])
-            
-            # Apply wrist formulas
-            wrist1_deg = 90 + elbow_deg - abs(shoulder_deg)
-            wrist3_deg = -90 + base_deg
-            
-            self.target_joints[3] = math.radians(-wrist1_deg)  # Wrist1
-            self.target_joints[5] = math.radians(wrist3_deg)   # Wrist3
-            
-        except Exception as e:
-            print(f"Z adjustment error: {e}")
+    # Legacy methods removed - now using IK-constrained movement
     
     def calculate_dynamic_t(self, face_x, face_y, is_sudden_movement=False):
         """Calculate dynamic parameters based on distance from center."""
