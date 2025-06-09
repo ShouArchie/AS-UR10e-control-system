@@ -22,8 +22,8 @@ class SpaceMouseRobotController:
         self.joystick = None
         
         # Control parameters
-        self.translation_scale = 0.004  # Scale factor for translation (m per axis unit)
-        self.rotation_scale = 0.01      # Scale factor for rotation (rad per axis unit)
+        self.translation_scale = 0.1  # Scale factor for translation (m per axis unit)
+        self.rotation_scale = 0.2      # Scale factor for rotation (rad per axis unit)
         
         # Current target pose (will be set to starting position)
         self.target_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -169,10 +169,7 @@ class SpaceMouseRobotController:
                            f"a=0.5, v=0.3)")
             print(f"Sending URScript: {urscript_cmd}")
             self.robot.send_program(urscript_cmd)
-            
-            # Wait for movement to complete
-            print("Waiting for movement to complete...")
-            time.sleep(8)
+            time.sleep(5)
             
             # Get current pose for space mouse control
             current_pose = self.get_current_pose()
@@ -211,11 +208,11 @@ class SpaceMouseRobotController:
             # Axis 4: Wrist2 (joint 4)
             # Axis 5: Wrist3 (joint 5)
             movement = {
-                'x': -axis_values[1] if len(axis_values) > 1 else 0.0,  # X (reversed)
+                'x': axis_values[1] if len(axis_values) > 1 else 0.0,  # X (reversed)
                 'y': axis_values[0] if len(axis_values) > 0 else 0.0,   # Y
-                'z': axis_values[2] if len(axis_values) > 2 else 0.0,  # Z (reversed)
+                'z': -axis_values[2] if len(axis_values) > 2 else 0.0,  # Z (reversed)
                 'wrist1': -axis_values[3] if len(axis_values) > 3 else 0.0,  # Wrist1
-                'wrist2': axis_values[4] if len(axis_values) > 4 else 0.0,  # Wrist2 (now axis 4)
+                'wrist2': -axis_values[4] if len(axis_values) > 4 else 0.0,  # Wrist2 (now axis 4)
                 'wrist3': axis_values[5] if len(axis_values) > 5 else 0.0,  # Wrist3
                 'raw_axes': axis_values
             }
@@ -232,38 +229,30 @@ class SpaceMouseRobotController:
             return None
     
     def send_relative_movement(self, movement):
-        """Send relative movement commands directly to robot, including wrist joints, with deadzone check."""
+        """Send relative movement commands directly to robot, including wrist joints, with deadzone check. Uses speedl for translation."""
         if not movement:
             return
-        # Only send command if any axis exceeds the deadzone (0.7)
         movement_threshold = 0.7
         raw_axes = movement['raw_axes']
-        if all(abs(axis) < movement_threshold for axis in raw_axes):
-            return  # Don't send any commands when all axes are below threshold
-        # Translation (TCP-relative)
         dx = movement['x'] * self.translation_scale
         dy = movement['y'] * self.translation_scale
         dz = movement['z'] * self.translation_scale
-        # Wrist joint increments
-        wrist1_inc = movement['wrist1'] * self.rotation_scale
-        wrist2_inc = movement['wrist2'] * self.rotation_scale
-        wrist3_inc = movement['wrist3'] * self.rotation_scale
-        # If any translation, send movel in TCP frame
+        wrist1_vel = movement['wrist1'] * self.rotation_scale
+        wrist2_vel = movement['wrist2'] * self.rotation_scale
+        wrist3_vel = movement['wrist3'] * self.rotation_scale
+        # If all axes are below threshold, stop robot with stopl and stop wrist motion with speedj
+        if all(abs(axis) < movement_threshold for axis in raw_axes):
+            self.robot.send_program("stopl(0.5)")
+            self.robot.send_program("speedj([0,0,0,0,0,0], 2.0, 0.05)")
+            return
+        # If any translation, send speedl in TCP frame
         if abs(dx) > 0.0001 or abs(dy) > 0.0001 or abs(dz) > 0.0001:
-            urscript_cmd = f"movel(pose_trans(get_actual_tcp_pose(), p[{dx:.6f}, {dy:.6f}, {dz:.6f}, 0, 0, 0]), a=1.0, v=0.2)"
+            urscript_cmd = f"speedl([{dx:.6f}, {dy:.6f}, {dz:.6f}, 0, 0, 0], 0.5, 1.0)"
             self.robot.send_program(urscript_cmd)
-        # If any wrist movement, send movej with small increments
-        if abs(wrist1_inc) > 0.0001 or abs(wrist2_inc) > 0.0001 or abs(wrist3_inc) > 0.0001:
-            try:
-                current_joints = self.robot.getj()
-                new_joints = list(current_joints)
-                new_joints[3] += wrist1_inc  # wrist1
-                new_joints[4] += wrist2_inc  # wrist2
-                new_joints[5] += wrist3_inc  # wrist3
-                urscript_cmd = f"movej([{','.join(f'{j:.6f}' for j in new_joints)}], a=1.0, v=0.2)"
-                self.robot.send_program(urscript_cmd)
-            except Exception as e:
-                print(f"\nError sending wrist joint command: {e}")
+        # If any wrist movement, send speedj for wrists
+        if abs(wrist1_vel) > 0.0001 or abs(wrist2_vel) > 0.0001 or abs(wrist3_vel) > 0.0001:
+            urscript_cmd = f"speedj([0,0,0,{wrist1_vel:.6f},{wrist2_vel:.6f},{wrist3_vel:.6f}], 2, 0.5)"
+            self.robot.send_program(urscript_cmd)
     
     def run_control(self):
         """Main control loop with camera view and keyboard toggling."""
@@ -305,6 +294,7 @@ class SpaceMouseRobotController:
                 # --- CAMERA VIEW ---
                 ret, frame = cam.read()
                 if ret:
+                    frame = cv2.flip(frame, -1)  # Flip vertically
                     cv2.imshow("Camera View (ESC to quit, SPACE to toggle control)", frame)
                 else:
                     cv2.imshow("Camera View (ESC to quit, SPACE to toggle control)", np.zeros((480,640,3), dtype=np.uint8))
