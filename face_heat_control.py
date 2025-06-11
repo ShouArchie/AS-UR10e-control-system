@@ -393,9 +393,15 @@ class FaceHeatTracker:
             print(f"Control loop error: {outer_e}")
     
     def get_current_pose(self):
-        """Get current TCP pose as a list, handling PoseVector issues (array, attribute, index, string parsing). For X direction movement, use direct attribute access."""
+        """
+        Get current TCP pose as a list of floats.
+        ---
+        NOTE: URX's getl() and PoseVector are broken on this system (no tolist(), not iterable, etc).
+        The only reliable way is to use direct attribute access for x, y, z, rx, ry, rz.
+        This method is used for all X direction movement and anywhere a robust pose is needed.
+        """
         try:
-            # Use direct attribute access as the primary method (since this is the only reliable way on this system)
+            # Direct attribute access is the only reliable method on this system
             return [
                 float(self.robot.x),
                 float(self.robot.y),
@@ -406,41 +412,17 @@ class FaceHeatTracker:
             ]
         except Exception as e:
             print(f"Error getting current pose with attribute access: {e}")
-        # Fallbacks (should not be needed, but kept for robustness)
-        try:
-            pose = self.robot.getl()
-            # Try array attribute (most robust)
-            try:
-                return list(pose.array)
-            except Exception:
-                pass
-            # Try attribute access
-            try:
-                return [float(pose.x), float(pose.y), float(pose.z), float(pose.rx), float(pose.ry), float(pose.rz)]
-            except Exception:
-                pass
-            # Try index access
-            try:
-                return [float(pose[i]) for i in range(6)]
-            except Exception:
-                pass
-            # Try string parsing as last resort
-            try:
-                pose_str = str(pose)
-                import re
-                numbers = re.findall(r'-?\d+\.\d+', pose_str)
-                if len(numbers) >= 6:
-                    return [float(n) for n in numbers[:6]]
-            except Exception as e:
-                print(f"String parse error: {e}")
-            print(f"Could not convert pose: {pose}")
-            return None
-        except Exception as e:
-            print(f"Error getting current pose: {e}")
             return None
     
     def handle_arrow_keys(self):
-        """Handle arrow key presses for X-axis movement using tool-relative moveL (works only when tracking is paused)."""
+        """
+        Handle arrow key presses for X-axis movement using tool-relative moveL.
+        ---
+        We originally tried to use URX's movel with a pose list, but due to PoseVector bugs,
+        this caused errors ('PoseVector' object is not iterable). The solution is to use
+        URScript's pose_trans to move in the tool's X direction, which is robust and does not
+        require any PoseVector conversion.
+        """
         while self.running:
             try:
                 if not self.tracking_active:
