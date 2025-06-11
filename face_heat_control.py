@@ -45,14 +45,14 @@ class FaceHeatTracker:
             math.radians(-90)       # Wrist3 = -90°
         ]
         
-        # PID Controller parameters for Y and Z movements (increased for faster response)
-        self.pid_kp_y = 0.003   # Proportional gain for Y (left/right) - increased for speed
-        self.pid_ki_y = 0.0003  # Integral gain for Y - increased for speed
-        self.pid_kd_y = 0.0006  # Derivative gain for Y - increased for speed
+        # PID Controller parameters for Y and Z movements (reduced for less overshoot)
+        self.pid_kp_y = 0.002   # Proportional gain for Y (left/right) - reduced for less overshoot
+        self.pid_ki_y = 0.0003  # Integral gain for Y
+        self.pid_kd_y = 0.0006  # Derivative gain for Y
         
-        self.pid_kp_z = 0.003   # Proportional gain for Z (up/down) - increased for speed
-        self.pid_ki_z = 0.0003  # Integral gain for Z - increased for speed
-        self.pid_kd_z = 0.0006  # Derivative gain for Z - increased for speed
+        self.pid_kp_z = 0.002   # Proportional gain for Z (up/down) - reduced for less overshoot
+        self.pid_ki_z = 0.0003  # Integral gain for Z
+        self.pid_kd_z = 0.0006  # Derivative gain for Z
         
         # PID state variables
         self.error_integral_y = 0.0
@@ -499,7 +499,7 @@ class FaceHeatTracker:
                     print("Failed to capture frame")
                     continue
                 
-                frame = cv2.flip(frame, -1)  # Mirror
+                
                 
                 # Detect face
                 face_data = self.detect_face(frame)
