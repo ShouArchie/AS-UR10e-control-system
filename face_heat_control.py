@@ -9,7 +9,7 @@ import mediapipe as mp
 import keyboard
 
 
-ROBOT_IP = "192.168.10.223"
+ROBOT_IP = "192.168.0.101"
 
 THERMAL_CAMERA_INDEX = 1
 REGULAR_CAMERA_INDEX = 0
@@ -57,8 +57,8 @@ class FaceHeatTracker:
         self.previous_error_z = 0.0
         
         # Speed limits for safety (reduced for less sensitivity)
-        self.max_speed_y = 0.02  # Max Y speed (m/s) - reduced for gentle movement
-        self.max_speed_z = 0.02  # Max Z speed (m/s) - reduced for gentle movement
+        self.max_speed_y = 2.5  # Max Y speed (m/s) - reduced for gentle movement
+        self.max_speed_z = 2.5  # Max Z speed (m/s) - reduced for gentle movement
         
         # Deadzone to prevent jittery movement (increased for less sensitivity)
         self.deadzone_radius = 25  # pixels - increased for larger deadzone
@@ -273,7 +273,7 @@ class FaceHeatTracker:
         return face_x, face_y
     
     def calculate_pid_speeds(self, face_x, face_y):
-        """Calculate Y and Z speeds using PID control."""
+        """Calculate Y and Z speeds using PID control with adaptive gains based on distance."""
         # Get smoothed face position
         smooth_x, smooth_y = self.smooth_face_position(face_x, face_y)
         
@@ -291,6 +291,23 @@ class FaceHeatTracker:
             self.previous_error_z = 0.0
             return 0.0, 0.0  # No movement in deadzone
         
+        # Calculate adaptive gain multiplier based on distance from center
+        # Far from center = higher multiplier (up to 2x), close to center = normal multiplier (1x)
+        max_distance = math.sqrt(self.center_x**2 + self.center_y**2)  # Corner of frame
+        normalized_distance = min(distance_from_center / max_distance, 1.0)
+        
+        # Exponential scaling: starts at 1x for close, goes up to 2x for far
+        gain_multiplier = 1.0 + (normalized_distance ** 2) * 1.0  # 1x to 2x range
+        
+        # Apply adaptive gains
+        kp_y_adaptive = self.pid_kp_y * gain_multiplier
+        ki_y_adaptive = self.pid_ki_y * gain_multiplier
+        kd_y_adaptive = self.pid_kd_y * gain_multiplier
+        
+        kp_z_adaptive = self.pid_kp_z * gain_multiplier
+        ki_z_adaptive = self.pid_ki_z * gain_multiplier
+        kd_z_adaptive = self.pid_kd_z * gain_multiplier
+        
         # PID calculation for Y (left/right movement)
         self.error_integral_y += error_x
         error_derivative_y = error_x - self.previous_error_y
@@ -299,9 +316,9 @@ class FaceHeatTracker:
         max_integral = 100
         self.error_integral_y = max(-max_integral, min(max_integral, self.error_integral_y))
         
-        dy = (self.pid_kp_y * error_x + 
-              self.pid_ki_y * self.error_integral_y + 
-              self.pid_kd_y * error_derivative_y)
+        dy = (kp_y_adaptive * error_x + 
+              ki_y_adaptive * self.error_integral_y + 
+              kd_y_adaptive * error_derivative_y)
         
         # PID calculation for Z (up/down movement) - FLIPPED
         self.error_integral_z += error_y
@@ -310,9 +327,9 @@ class FaceHeatTracker:
         # Integral windup protection
         self.error_integral_z = max(-max_integral, min(max_integral, self.error_integral_z))
         
-        dz = -(self.pid_kp_z * error_y +  # NEGATIVE for correct up/down movement
-               self.pid_ki_z * self.error_integral_z + 
-               self.pid_kd_z * error_derivative_z)
+        dz = -(kp_z_adaptive * error_y +  # NEGATIVE for correct up/down movement
+               ki_z_adaptive * self.error_integral_z + 
+               kd_z_adaptive * error_derivative_z)
         
         # Apply speed limits
         dy_limited = max(-self.max_speed_y, min(self.max_speed_y, dy))
@@ -332,11 +349,11 @@ class FaceHeatTracker:
                 self.robot.send_program("stopl(0.2)")
                 return
                 
-            # Send speedL command with dx=0 (X movement constrained)
-            urscript_cmd = f"speedl([0.0, {dy:.6f}, {dz:.6f}, 0, 0, 0], 0.3, 0.1)"
+            # Send speedL command with dx=0 (X movement constrained) - should not move in base X
+            urscript_cmd = f"speedl([0.0, {dy:.6f}, {dz:.6f}, 0, 0, 0], 1, 0.8)"
             self.robot.send_program(urscript_cmd)
             
-        except Exception as e:
+        except Exception as e: 
             print(f"Error sending speed command: {e}")
     
     def control_loop(self):
