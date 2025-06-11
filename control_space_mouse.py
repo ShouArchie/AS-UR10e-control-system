@@ -22,8 +22,8 @@ class SpaceMouseRobotController:
         self.joystick = None
         
         # Control parameters
-        self.translation_scale = 0.1  # Scale factor for translation (m per axis unit)
-        self.rotation_scale = 0.2      # Scale factor for rotation (rad per axis unit)
+        self.translation_scale = 0.3  # Scale factor for translation (m per axis unit)
+        self.rotation_scale = 0.5      # Scale factor for rotation (rad per axis unit)
         
         # Current target pose (will be set to starting position)
         self.target_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -196,7 +196,7 @@ class SpaceMouseRobotController:
                 return None
             axis_values = [self.joystick.get_axis(i) for i in range(num_axes)]
             # Apply deadzone of 0.7 for all axes
-            dead_zone = 0.7
+            dead_zone = 0.6
             for i in range(len(axis_values)):
                 if abs(axis_values[i]) < dead_zone:
                     axis_values[i] = 0.0
@@ -279,7 +279,7 @@ class SpaceMouseRobotController:
         time.sleep(2)
         
         # Open camera
-        cam = cv2.VideoCapture(0)
+        cam = cv2.VideoCapture(1)
         if not cam.isOpened():
             print("Could not open camera at index 1!")
             self.robot.close()
