@@ -390,7 +390,7 @@ class FaceTrackingCamera:
             
             # Skip if update rate is too fast
             if dt < PID_UPDATE_RATE:
-            return
+                return
         
             face_x, face_y, face_w, face_h = face_center
             

@@ -9,6 +9,10 @@ import mediapipe as mp
 import keyboard
 
 
+# max_speed can be changed to only change max speed but robot mostly don't reach that with current PID
+# You can also change the PID parameters to change the response time and accuracy and speed of robot
+# SpeedL if time is too short you won't have enough time to reach max speed
+
 ROBOT_IP = "192.168.0.101"
 
 THERMAL_CAMERA_INDEX = 1
@@ -41,14 +45,14 @@ class FaceHeatTracker:
             math.radians(-90)       # Wrist3 = -90°
         ]
         
-        # PID Controller parameters for Y and Z movements (reduced for less sensitivity)
-        self.pid_kp_y = 0.0005  # Proportional gain for Y (left/right) - reduced
-        self.pid_ki_y = 0.00005 # Integral gain for Y - reduced
-        self.pid_kd_y = 0.0001  # Derivative gain for Y - reduced
+        # PID Controller parameters for Y and Z movements (increased for faster response)
+        self.pid_kp_y = 0.003   # Proportional gain for Y (left/right) - increased for speed
+        self.pid_ki_y = 0.0003  # Integral gain for Y - increased for speed
+        self.pid_kd_y = 0.0006  # Derivative gain for Y - increased for speed
         
-        self.pid_kp_z = 0.0005  # Proportional gain for Z (up/down) - reduced
-        self.pid_ki_z = 0.00005 # Integral gain for Z - reduced
-        self.pid_kd_z = 0.0001  # Derivative gain for Z - reduced
+        self.pid_kp_z = 0.003   # Proportional gain for Z (up/down) - increased for speed
+        self.pid_ki_z = 0.0003  # Integral gain for Z - increased for speed
+        self.pid_kd_z = 0.0006  # Derivative gain for Z - increased for speed
         
         # PID state variables
         self.error_integral_y = 0.0
@@ -64,7 +68,7 @@ class FaceHeatTracker:
         self.deadzone_radius = 25  # pixels - increased for larger deadzone
         
         # Arrow key control for X movement
-        self.x_move_step = 0.01  # 10mm steps
+        self.x_move_step = 0.05  # 50mm steps for more visible movement
         self.arrow_key_thread = None
         
         # Face detection
@@ -357,10 +361,11 @@ class FaceHeatTracker:
             print(f"Error sending speed command: {e}")
     
     def control_loop(self):
-        """Main control loop for face tracking."""
+        """Main control loop for face tracking - truly pauses when tracking is inactive."""
         try:
             while self.control_running and self.running:
                 try:
+                    # Only run control loop when tracking is active
                     if self.tracking_active:
                         if self.last_face_position:
                             face_x, face_y = self.last_face_position
@@ -373,8 +378,12 @@ class FaceHeatTracker:
                         else:
                             # Stop robot when no face detected
                             self.robot.send_program("stopl(0.2)")
-                    
-                    time.sleep(1.0 / 60.0)  # 60 Hz control loop
+                        
+                        time.sleep(1.0 / 60.0)  # 60 Hz control loop
+                    else:
+                        # When tracking is paused, truly pause the control loop
+                        # Send stopl only once when first paused, then sleep
+                        time.sleep(0.5)  # Long sleep when paused - control loop effectively stopped
                     
                 except Exception as inner_e:
                     print(f"Control loop error: {inner_e}")
@@ -383,25 +392,80 @@ class FaceHeatTracker:
         except Exception as outer_e:
             print(f"Control loop error: {outer_e}")
     
+    def get_current_pose(self):
+        """Get current TCP pose as a list, handling PoseVector issues (array, attribute, index, string parsing). For X direction movement, use direct attribute access."""
+        try:
+            # Use direct attribute access as the primary method (since this is the only reliable way on this system)
+            return [
+                float(self.robot.x),
+                float(self.robot.y),
+                float(self.robot.z),
+                float(self.robot.rx),
+                float(self.robot.ry),
+                float(self.robot.rz)
+            ]
+        except Exception as e:
+            print(f"Error getting current pose with attribute access: {e}")
+        # Fallbacks (should not be needed, but kept for robustness)
+        try:
+            pose = self.robot.getl()
+            # Try array attribute (most robust)
+            try:
+                return list(pose.array)
+            except Exception:
+                pass
+            # Try attribute access
+            try:
+                return [float(pose.x), float(pose.y), float(pose.z), float(pose.rx), float(pose.ry), float(pose.rz)]
+            except Exception:
+                pass
+            # Try index access
+            try:
+                return [float(pose[i]) for i in range(6)]
+            except Exception:
+                pass
+            # Try string parsing as last resort
+            try:
+                pose_str = str(pose)
+                import re
+                numbers = re.findall(r'-?\d+\.\d+', pose_str)
+                if len(numbers) >= 6:
+                    return [float(n) for n in numbers[:6]]
+            except Exception as e:
+                print(f"String parse error: {e}")
+            print(f"Could not convert pose: {pose}")
+            return None
+        except Exception as e:
+            print(f"Error getting current pose: {e}")
+            return None
+    
     def handle_arrow_keys(self):
-        """Handle arrow key presses for X-axis movement using moveL (works regardless of tracking state)."""
+        """Handle arrow key presses for X-axis movement using tool-relative moveL (works only when tracking is paused)."""
         while self.running:
             try:
-                if keyboard.is_pressed('up'):
-                    # Move forward in X direction using URScript to avoid PoseVector issues
-                    urscript_cmd = f"pose = get_actual_tcp_pose()\nmovel(pose_trans(pose, p[{self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.3, v=0.1)"
-                    self.robot.send_program(urscript_cmd)
-                    time.sleep(0.3)  # Prevent rapid movement
-                    
-                elif keyboard.is_pressed('down'):
-                    # Move backward in X direction using URScript to avoid PoseVector issues
-                    urscript_cmd = f"pose = get_actual_tcp_pose()\nmovel(pose_trans(pose, p[{-self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.3, v=0.1)"
-                    self.robot.send_program(urscript_cmd)
-                    time.sleep(0.3)
-                    
+                if not self.tracking_active:
+                    if keyboard.is_pressed('up'):
+                        try:
+                            print(f"UP: Moving forward {self.x_move_step*1000:.0f}mm in tool X (tracking is PAUSED)")
+                            urscript_cmd = f"movel(pose_trans(get_actual_tcp_pose(), p[{self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.5, v=0.2)"
+                            print(f"DEBUG: Sending URScript: {urscript_cmd}")
+                            self.robot.send_program(urscript_cmd)
+                        except Exception as move_e:
+                            print(f"UP movement error: {move_e}")
+                        time.sleep(1.0)
+                    elif keyboard.is_pressed('down'):
+                        try:
+                            print(f"DOWN: Moving backward {self.x_move_step*1000:.0f}mm in tool X (tracking is PAUSED)")
+                            urscript_cmd = f"movel(pose_trans(get_actual_tcp_pose(), p[-{self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.5, v=0.2)"
+                            print(f"DEBUG: Sending URScript: {urscript_cmd}")
+                            self.robot.send_program(urscript_cmd)
+                        except Exception as move_e:
+                            print(f"DOWN movement error: {move_e}")
+                        time.sleep(1.0)
+                    else:
+                        time.sleep(0.05)
                 else:
-                    time.sleep(0.05)  # Check keys regularly
-                    
+                    time.sleep(0.1)
             except Exception as e:
                 print(f"Arrow key error: {e}")
                 time.sleep(0.1)
@@ -510,8 +574,11 @@ class FaceHeatTracker:
                     self.previous_error_z = 0.0
                     
                     if not self.tracking_active:
-                        # Stop robot immediately when pausing
+                        # Stop robot immediately when pausing and notify control loop is paused
                         self.robot.send_program("stopl(0.5)")
+                        print("Control loop paused - arrow keys now available")
+                    else:
+                        print("Control loop resumed - arrow keys disabled")
                 
             except Exception as e:
                 print(f"Main loop error: {e}")
