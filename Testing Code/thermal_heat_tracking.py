@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # === CONFIGURATION ===
-THERMAL_CAMERA_INDEX = 2  # Change if your HIKMICRO camera uses a different index
+THERMAL_CAMERA_INDEX = 1  # Change if your HIKMICRO camera uses a different index
 WINDOW_NAME = "Thermal Heat Tracking"
 
 
@@ -72,7 +72,7 @@ def main():
         frame = cv2.rotate(frame, cv2.ROTATE_180)
 
         # Crop out top 40 pixels and right 30 pixels
-        frame = frame[70:, :-80]
+        frame = frame[80:, :-80]
 
         # Find the hottest point
         x, y, maxVal = find_hottest_point(frame)

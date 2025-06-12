@@ -15,8 +15,8 @@ import keyboard
 
 ROBOT_IP = "192.168.0.101"
 
-THERMAL_CAMERA_INDEX = 1
-REGULAR_CAMERA_INDEX = 0
+THERMAL_CAMERA_INDEX = 0
+REGULAR_CAMERA_INDEX = 1
 
 
 class FaceHeatTracker:
@@ -25,8 +25,10 @@ class FaceHeatTracker:
     def __init__(self):
         self.robot = None
         self.cap = None
+        self.thermal_cap = None
         self.running = False
-        self.tracking_active = False
+        self.face_tracking_active = False
+        self.thermal_tracking_active = False
         
         # Camera settings - 60 FPS
         self.frame_width = 640
@@ -54,15 +56,26 @@ class FaceHeatTracker:
         self.pid_ki_z = 0.0003  # Integral gain for Z
         self.pid_kd_z = 0.0006  # Derivative gain for Z
         
+        # Separate PID parameters for thermal tracking (much more conservative)
+        self.thermal_pid_kp_y = 0.0008  # Lower proportional gain for thermal Y
+        self.thermal_pid_ki_y = 0.0001  # Lower integral gain for thermal Y
+        self.thermal_pid_kd_y = 0.0003  # Lower derivative gain for thermal Y
+        
+        self.thermal_pid_kp_z = 0.0008  # Lower proportional gain for thermal Z
+        self.thermal_pid_ki_z = 0.0001  # Lower integral gain for thermal Z
+        self.thermal_pid_kd_z = 0.0003  # Lower derivative gain for thermal Z
+        
         # PID state variables
         self.error_integral_y = 0.0
         self.error_integral_z = 0.0
         self.previous_error_y = 0.0
         self.previous_error_z = 0.0
         
-        # Speed limits for safety (reduced for less sensitivity)
-        self.max_speed_y = 2.5  # Max Y speed (m/s) - reduced for gentle movement
-        self.max_speed_z = 2.5  # Max Z speed (m/s) - reduced for gentle movement
+        # Speed limits for safety (different for face vs thermal tracking)
+        self.max_speed_y_face = 2.5  # Max Y speed for face tracking (m/s)
+        self.max_speed_z_face = 2.5  # Max Z speed for face tracking (m/s)
+        self.max_speed_y_thermal = 0.5  # Max Y speed for thermal tracking (m/s)
+        self.max_speed_z_thermal = 0.5  # Max Z speed for thermal tracking (m/s)
         
         # Deadzone to prevent jittery movement (increased for less sensitivity)
         self.deadzone_radius = 25  # pixels - increased for larger deadzone
@@ -83,6 +96,7 @@ class FaceHeatTracker:
         self.control_thread = None
         self.control_running = False
         self.last_face_position = None
+        self.last_thermal_position = None
         
     def connect_robot(self):
         """Connect to robot."""
@@ -223,11 +237,38 @@ class FaceHeatTracker:
             actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
             
-            print(f"✓ Camera ready: {actual_width}x{actual_height} @ {actual_fps} FPS")
+            print(f"✓ Regular camera ready: {actual_width}x{actual_height} @ {actual_fps} FPS")
             return True
             
         except Exception as e:
-            print(f"✗ Camera failed: {e}")
+            print(f"✗ Regular camera failed: {e}")
+            return False
+    
+    def init_thermal_camera(self):
+        """Initialize thermal camera."""
+        try:
+            print("Initializing thermal camera...")
+            self.thermal_cap = cv2.VideoCapture(THERMAL_CAMERA_INDEX)
+            
+            if not self.thermal_cap.isOpened():
+                print(f"✗ Could not open thermal camera at index {THERMAL_CAMERA_INDEX}")
+                return False
+            
+            # Set camera properties
+            self.thermal_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
+            self.thermal_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
+            self.thermal_cap.set(cv2.CAP_PROP_FPS, 25)  # Set thermal camera to 25 Hz
+            
+            # Get actual properties
+            actual_width = int(self.thermal_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.thermal_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self.thermal_cap.get(cv2.CAP_PROP_FPS)
+            
+            print(f"✓ Thermal camera ready: {actual_width}x{actual_height} @ {actual_fps} FPS")
+            return True
+            
+        except Exception as e:
+            print(f"✗ Thermal camera failed: {e}")
             return False
     
     def detect_face(self, frame):
@@ -257,6 +298,54 @@ class FaceHeatTracker:
             print(f"Face detection error: {e}")
             return None
     
+    def find_hottest_point(self, frame):
+        """Find the hottest point in thermal image (adapted from thermal_heat_tracking.py)."""
+        try:
+            # If the frame is colored, convert to grayscale
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
+
+            # Threshold to find hot regions (use a high threshold, e.g., 90% of max)
+            minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(gray)
+            thresh_val = maxVal * 0.9
+            _, thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
+
+            # Find contours of hot regions
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # Filter contours by area > 200 pixels
+            valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 200]
+            if not valid_contours:
+                # Fallback to hottest pixel if no valid region
+                x, y = maxLoc
+                return x, y, maxVal
+
+            # Find the contour with the greatest total heat
+            max_heat = -1
+            best_cx, best_cy, best_max = 0, 0, 0
+            for cnt in valid_contours:
+                mask = np.zeros_like(gray)
+                cv2.drawContours(mask, [cnt], -1, 255, -1)
+                region_vals = gray[mask == 255]
+                total_heat = np.sum(region_vals)
+                if total_heat > max_heat:
+                    max_heat = total_heat
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                    else:
+                        cx, cy = 0, 0
+                    region_max = float(np.max(region_vals)) if region_vals.size > 0 else maxVal
+                    best_cx, best_cy, best_max = cx, cy, region_max
+
+            return best_cx, best_cy, best_max
+        except Exception as e:
+            print(f"Thermal detection error: {e}")
+            return None
+    
     def smooth_face_position(self, face_x, face_y):
         """Apply moving average filter to face position."""
         now = time.time()
@@ -276,14 +365,23 @@ class FaceHeatTracker:
         
         return face_x, face_y
     
-    def calculate_pid_speeds(self, face_x, face_y):
+    def calculate_pid_speeds(self, target_x, target_y, is_thermal=False, center_x=None, center_y=None):
         """Calculate Y and Z speeds using PID control with adaptive gains based on distance."""
-        # Get smoothed face position
-        smooth_x, smooth_y = self.smooth_face_position(face_x, face_y)
+        # Use provided center coordinates or default to camera center
+        if center_x is None:
+            center_x = self.center_x
+        if center_y is None:
+            center_y = self.center_y
+            
+        # Get smoothed position (only for face tracking)
+        if not is_thermal:
+            smooth_x, smooth_y = self.smooth_face_position(target_x, target_y)
+        else:
+            smooth_x, smooth_y = target_x, target_y
         
         # Calculate errors (offset from center)
-        error_x = smooth_x - self.center_x  # For Y movement (left/right)
-        error_y = smooth_y - self.center_y  # For Z movement (up/down)
+        error_x = smooth_x - center_x  # For Y movement (left/right)
+        error_y = smooth_y - center_y  # For Z movement (up/down)
         
         # Check deadzone
         distance_from_center = math.sqrt(error_x**2 + error_y**2)
@@ -303,14 +401,32 @@ class FaceHeatTracker:
         # Exponential scaling: starts at 1x for close, goes up to 2x for far
         gain_multiplier = 1.0 + (normalized_distance ** 2) * 1.0  # 1x to 2x range
         
-        # Apply adaptive gains
-        kp_y_adaptive = self.pid_kp_y * gain_multiplier
-        ki_y_adaptive = self.pid_ki_y * gain_multiplier
-        kd_y_adaptive = self.pid_kd_y * gain_multiplier
+        # Select PID gains based on tracking mode
+        if is_thermal:
+            # Use thermal-specific PID gains (more conservative)
+            base_kp_y = self.thermal_pid_kp_y
+            base_ki_y = self.thermal_pid_ki_y
+            base_kd_y = self.thermal_pid_kd_y
+            base_kp_z = self.thermal_pid_kp_z
+            base_ki_z = self.thermal_pid_ki_z
+            base_kd_z = self.thermal_pid_kd_z
+        else:
+            # Use face tracking PID gains
+            base_kp_y = self.pid_kp_y
+            base_ki_y = self.pid_ki_y
+            base_kd_y = self.pid_kd_y
+            base_kp_z = self.pid_kp_z
+            base_ki_z = self.pid_ki_z
+            base_kd_z = self.pid_kd_z
         
-        kp_z_adaptive = self.pid_kp_z * gain_multiplier
-        ki_z_adaptive = self.pid_ki_z * gain_multiplier
-        kd_z_adaptive = self.pid_kd_z * gain_multiplier
+        # Apply adaptive gains
+        kp_y_adaptive = base_kp_y * gain_multiplier
+        ki_y_adaptive = base_ki_y * gain_multiplier
+        kd_y_adaptive = base_kd_y * gain_multiplier
+        
+        kp_z_adaptive = base_kp_z * gain_multiplier
+        ki_z_adaptive = base_ki_z * gain_multiplier
+        kd_z_adaptive = base_kd_z * gain_multiplier
         
         # PID calculation for Y (left/right movement)
         self.error_integral_y += error_x
@@ -335,9 +451,16 @@ class FaceHeatTracker:
                ki_z_adaptive * self.error_integral_z + 
                kd_z_adaptive * error_derivative_z)
         
-        # Apply speed limits
-        dy_limited = max(-self.max_speed_y, min(self.max_speed_y, dy))
-        dz_limited = max(-self.max_speed_z, min(self.max_speed_z, dz))
+        # Apply speed limits based on tracking mode
+        if is_thermal:
+            max_speed_y = self.max_speed_y_thermal
+            max_speed_z = self.max_speed_z_thermal
+        else:
+            max_speed_y = self.max_speed_y_face
+            max_speed_z = self.max_speed_z_face
+        
+        dy_limited = max(-max_speed_y, min(max_speed_y, dy))
+        dz_limited = max(-max_speed_z, min(max_speed_z, dz))
         
         # Update previous errors
         self.previous_error_y = error_x
@@ -346,43 +469,68 @@ class FaceHeatTracker:
         return dy_limited, dz_limited
     
     def send_speed_command(self, dy, dz):
-        """Send speedL command with dx=0 (X constrained)."""
+        """Send speedL command with dx=0 (X constrained) and different acceleration based on tracking mode."""
         try:
             if abs(dy) < 0.001 and abs(dz) < 0.001:
                 # Stop robot if speeds are very small
                 self.robot.send_program("stopl(0.2)")
                 return
+            
+            # Set acceleration and time based on tracking mode
+            if self.thermal_tracking_active:
+                acceleration = 0.1  # Lower acceleration for thermal tracking
+                time_param = 0.3    # Shorter time for thermal tracking to reduce overshooting
+            else:
+                acceleration = 1.0  # Default acceleration for face tracking
+                time_param = 0.8    # Default time for face tracking
                 
             # Send speedL command with dx=0 (X movement constrained) - should not move in base X
-            urscript_cmd = f"speedl([0.0, {dy:.6f}, {dz:.6f}, 0, 0, 0], 1, 0.8)"
+            urscript_cmd = f"speedl([0.0, {dy:.6f}, {dz:.6f}, 0, 0, 0], {acceleration}, {time_param})"
             self.robot.send_program(urscript_cmd)
             
         except Exception as e: 
             print(f"Error sending speed command: {e}")
     
     def control_loop(self):
-        """Main control loop for face tracking - truly pauses when tracking is inactive."""
+        """Main control loop for face and thermal tracking - truly pauses when both tracking modes are inactive."""
         try:
             while self.control_running and self.running:
                 try:
-                    # Only run control loop when tracking is active
-                    if self.tracking_active:
-                        if self.last_face_position:
-                            face_x, face_y = self.last_face_position
+                    # Only run control loop when either tracking mode is active
+                    if self.face_tracking_active or self.thermal_tracking_active:
+                        target_position = None
+                        is_thermal = False
+                        
+                        # Determine which tracking mode to use (face takes priority if both somehow active)
+                        if self.face_tracking_active and self.last_face_position:
+                            target_position = self.last_face_position
+                            is_thermal = False
+                        elif self.thermal_tracking_active and self.last_thermal_position:
+                            target_position = self.last_thermal_position
+                            is_thermal = True
+                        
+                        if target_position:
+                            target_x, target_y = target_position
                             
-                            # Calculate PID speeds
-                            dy, dz = self.calculate_pid_speeds(face_x, face_y)
+                            # Calculate PID speeds with appropriate center coordinates
+                            if is_thermal:
+                                # Use thermal center coordinates (will be set in main loop)
+                                dy, dz = self.calculate_pid_speeds(target_x, target_y, is_thermal, 
+                                                                 getattr(self, 'thermal_center_x', self.center_x),
+                                                                 getattr(self, 'thermal_center_y', self.center_y))
+                            else:
+                                # Use regular camera center coordinates
+                                dy, dz = self.calculate_pid_speeds(target_x, target_y, is_thermal)
                             
                             # Send speed command
                             self.send_speed_command(dy, dz)
                         else:
-                            # Stop robot when no face detected
+                            # Stop robot when no target detected
                             self.robot.send_program("stopl(0.2)")
                         
                         time.sleep(1.0 / 60.0)  # 60 Hz control loop
                     else:
-                        # When tracking is paused, truly pause the control loop
-                        # Send stopl only once when first paused, then sleep
+                        # When both tracking modes are paused, truly pause the control loop
                         time.sleep(0.5)  # Long sleep when paused - control loop effectively stopped
                     
                 except Exception as inner_e:
@@ -417,18 +565,15 @@ class FaceHeatTracker:
     def handle_arrow_keys(self):
         """
         Handle arrow key presses for X-axis movement using tool-relative moveL.
-        ---
-        We originally tried to use URX's movel with a pose list, but due to PoseVector bugs,
-        this caused errors ('PoseVector' object is not iterable). The solution is to use
-        URScript's pose_trans to move in the tool's X direction, which is robust and does not
-        require any PoseVector conversion.
+        Only works when both face and thermal tracking are OFF.
         """
         while self.running:
             try:
-                if not self.tracking_active:
+                # Arrow keys only work when BOTH tracking modes are off
+                if not self.face_tracking_active and not self.thermal_tracking_active:
                     if keyboard.is_pressed('up'):
                         try:
-                            print(f"UP: Moving forward {self.x_move_step*1000:.0f}mm in tool X (tracking is PAUSED)")
+                            print(f"UP: Moving forward {self.x_move_step*1000:.0f}mm in tool X (both tracking modes OFF)")
                             urscript_cmd = f"movel(pose_trans(get_actual_tcp_pose(), p[{self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.5, v=0.2)"
                             print(f"DEBUG: Sending URScript: {urscript_cmd}")
                             self.robot.send_program(urscript_cmd)
@@ -437,7 +582,7 @@ class FaceHeatTracker:
                         time.sleep(1.0)
                     elif keyboard.is_pressed('down'):
                         try:
-                            print(f"DOWN: Moving backward {self.x_move_step*1000:.0f}mm in tool X (tracking is PAUSED)")
+                            print(f"DOWN: Moving backward {self.x_move_step*1000:.0f}mm in tool X (both tracking modes OFF)")
                             urscript_cmd = f"movel(pose_trans(get_actual_tcp_pose(), p[-{self.x_move_step:.6f}, 0, 0, 0, 0, 0]), a=0.5, v=0.2)"
                             print(f"DEBUG: Sending URScript: {urscript_cmd}")
                             self.robot.send_program(urscript_cmd)
@@ -455,7 +600,7 @@ class FaceHeatTracker:
     def run(self):
         """Main execution."""
         print("\n=== FACE HEAT TRACKER with speedL ===")
-        print("SPACE: Toggle tracking, UP/DOWN: X movement, ESC: Exit")
+        print("F: Toggle face tracking, T: Toggle thermal tracking, SPACE: EMERGENCY STOP, UP/DOWN: X movement, ESC: Exit")
         
         # Initialize systems
         if not self.connect_robot():
@@ -470,12 +615,19 @@ class FaceHeatTracker:
             self.robot.close()
             return
         
+        if not self.init_thermal_camera():
+            self.robot.close()
+            return
+        
         print("\n✓ All systems ready!")
         print("Controls:")
-        print("  SPACE: Toggle face tracking ON/OFF")
-        print("  UP/DOWN arrows: Move forward/backward (X-axis) - works even when tracking is paused")
+        print("  F: Toggle face tracking ON/OFF")
+        print("  T: Toggle thermal tracking ON/OFF")
+        print("  SPACE: EMERGENCY STOP")
+        print("  UP/DOWN arrows: Move forward/backward (X-axis) - works only when both tracking modes are OFF")
         print("  ESC: Exit")
-        print("\nFace tracking starts PAUSED - press SPACE to activate!")
+        print("\nBoth tracking modes start OFF - press F for face tracking or T for thermal tracking!")
+        print("Note: Only one tracking mode can be active at a time. Max speed: Face=2.5m/s, Thermal=0.5m/s")
         
         # Set running flags FIRST before starting threads
         self.running = True
@@ -493,60 +645,141 @@ class FaceHeatTracker:
         
         while self.running:
             try:
-                # Capture frame
-                ret, frame = self.cap.read()
-                if not ret:
-                    print("Failed to capture frame")
+                # Capture from both cameras
+                ret_regular, regular_frame = self.cap.read()
+                ret_thermal, thermal_frame = self.thermal_cap.read()
+                
+                if not ret_regular:
+                    print("Failed to capture regular frame")
+                    continue
+                    
+                if not ret_thermal:
+                    print("Failed to capture thermal frame")
                     continue
                 
+                # Process thermal frame (flip and crop)
+                thermal_frame = cv2.rotate(thermal_frame, cv2.ROTATE_180)
+                thermal_frame = thermal_frame[80:, :-80]
                 
+                # Resize frames to ensure they're the same height
+                target_height = 480
+                regular_frame = cv2.resize(regular_frame, (640, target_height))
+                thermal_frame = cv2.resize(thermal_frame, (640, target_height))
                 
-                # Detect face
-                face_data = self.detect_face(frame)
+                # After resizing, recalculate thermal center (since resize changes dimensions)
+                thermal_center_x = thermal_frame.shape[1] // 2
+                thermal_center_y = thermal_frame.shape[0] // 2
                 
+                # Store thermal center coordinates for use in control loop
+                self.thermal_center_x = thermal_center_x
+                self.thermal_center_y = thermal_center_y
+                
+                # Process face detection on regular camera
+                face_data = self.detect_face(regular_frame)
                 if face_data:
                     face_x, face_y, x, y, w, h = face_data
                     self.last_face_position = (face_x, face_y)
                     
-                    # Draw face rectangle and center
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    cv2.circle(frame, (face_x, face_y), 5, (0, 255, 0), -1)
-                    
-                    # Draw deadzone circle
-                    cv2.circle(frame, (self.center_x, self.center_y), 
-                             self.deadzone_radius, (255, 255, 0), 2)
+                    # Draw face rectangle and center on regular frame
+                    cv2.rectangle(regular_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.circle(regular_frame, (face_x, face_y), 5, (0, 255, 0), -1)
                 else:
                     self.last_face_position = None
                 
-                # Draw center crosshair
-                cv2.circle(frame, (self.center_x, self.center_y), 3, (0, 0, 255), -1)
-                cv2.line(frame, (self.center_x-15, self.center_y), 
-                        (self.center_x+15, self.center_y), (0, 0, 255), 2)
-                cv2.line(frame, (self.center_x, self.center_y-15), 
-                        (self.center_x, self.center_y+15), (0, 0, 255), 2)
+                # Process thermal detection on thermal camera
+                thermal_data = self.find_hottest_point(thermal_frame)
+                if thermal_data:
+                    hot_x, hot_y, max_val = thermal_data
+                    self.last_thermal_position = (hot_x, hot_y)
+                    
+                    # Draw hottest point on thermal frame
+                    cv2.circle(thermal_frame, (hot_x, hot_y), 8, (0, 0, 255), 2)
+                    cv2.putText(thermal_frame, f"Hot: ({hot_x}, {hot_y}) {max_val:.1f}", (hot_x+10, hot_y-10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                else:
+                    self.last_thermal_position = None
                 
-                # Status display
-                status = "TRACKING" if self.tracking_active else "PAUSED"
-                color = (0, 255, 0) if self.tracking_active else (0, 0, 255)
-                cv2.putText(frame, f"Face Tracking: {status}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                # Draw center crosshairs and deadzones on both frames with correct centers
+                # Regular camera frame - use original center
+                cv2.circle(regular_frame, (self.center_x, self.center_y), 3, (0, 0, 255), -1)
+                cv2.line(regular_frame, (self.center_x-15, self.center_y), 
+                        (self.center_x+15, self.center_y), (0, 0, 255), 2)
+                cv2.line(regular_frame, (self.center_x, self.center_y-15), 
+                        (self.center_x, self.center_y+15), (0, 0, 255), 2)
+                cv2.circle(regular_frame, (self.center_x, self.center_y), 
+                         self.deadzone_radius, (255, 255, 0), 2)
+                
+                # Thermal camera frame - use thermal center
+                cv2.circle(thermal_frame, (thermal_center_x, thermal_center_y), 3, (0, 0, 255), -1)
+                cv2.line(thermal_frame, (thermal_center_x-15, thermal_center_y), 
+                        (thermal_center_x+15, thermal_center_y), (0, 0, 255), 2)
+                cv2.line(thermal_frame, (thermal_center_x, thermal_center_y-15), 
+                        (thermal_center_x, thermal_center_y+15), (0, 0, 255), 2)
+                cv2.circle(thermal_frame, (thermal_center_x, thermal_center_y), 
+                         self.deadzone_radius, (255, 255, 0), 2)
+                
+                # Add tracking status indicators to each frame
+                # Regular camera frame
+                face_color = (0, 255, 0) if self.face_tracking_active else (128, 128, 128)
+                cv2.putText(regular_frame, "FACE CAMERA", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, face_color, 2)
+                if self.face_tracking_active:
+                    cv2.putText(regular_frame, "ACTIVE", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    # Add border to indicate active tracking
+                    cv2.rectangle(regular_frame, (0, 0), (regular_frame.shape[1]-1, regular_frame.shape[0]-1), 
+                                 (0, 255, 0), 3)
+                
+                # Thermal camera frame
+                thermal_color = (0, 0, 255) if self.thermal_tracking_active else (128, 128, 128)
+                cv2.putText(thermal_frame, "THERMAL CAMERA", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, thermal_color, 2)
+                if self.thermal_tracking_active:
+                    cv2.putText(thermal_frame, "ACTIVE", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    # Add border to indicate active tracking
+                    cv2.rectangle(thermal_frame, (0, 0), (thermal_frame.shape[1]-1, thermal_frame.shape[0]-1), 
+                                 (0, 0, 255), 3)
+                
+                # Combine frames side by side
+                combined_frame = np.hstack((regular_frame, thermal_frame))
+                
+                # Add overall status at the top of combined frame
+                status_text = ""
+                if self.face_tracking_active:
+                    status_text = "FACE TRACKING ACTIVE (Max Speed: 2.5 m/s)"
+                    status_color = (0, 255, 0)
+                elif self.thermal_tracking_active:
+                    status_text = "THERMAL TRACKING ACTIVE (Max Speed: 0.5 m/s)"
+                    status_color = (0, 0, 255)
+                else:
+                    status_text = "TRACKING OFF - Arrow keys available"
+                    status_color = (255, 255, 0)
+                
+                cv2.putText(combined_frame, status_text, (10, combined_frame.shape[0] - 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
                 
                 # Controls info
-                cv2.putText(frame, "SPACE: Toggle tracking, UP/DOWN: X move (always), ESC: Exit", 
-                           (10, frame.shape[0]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, 
-                           (255, 255, 255), 1)
+                cv2.putText(combined_frame, "F: Face | T: Thermal | SPACE: Emergency Stop | UP/DOWN: X move | ESC: Exit", 
+                           (10, combined_frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, 
+                           (255, 255, 255), 2)
                 
-                # Show frame
-                cv2.imshow('Face Heat Tracker', frame)
+                # Show combined frame
+                cv2.imshow('Face & Thermal Tracker', combined_frame)
                 
                 # Handle keys
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:  # ESC
                     print("Exiting...")
                     break
-                elif key == ord(' '):  # SPACE
-                    self.tracking_active = not self.tracking_active
-                    status_text = "ACTIVATED" if self.tracking_active else "PAUSED"
+                elif key == ord('f') or key == ord('F'):  # F - Face tracking toggle
+                    if self.thermal_tracking_active:
+                        # Turn off thermal tracking first
+                        self.thermal_tracking_active = False
+                        print("Thermal tracking turned OFF")
+                    
+                    self.face_tracking_active = not self.face_tracking_active
+                    status_text = "ACTIVATED" if self.face_tracking_active else "DEACTIVATED"
                     print(f"Face tracking {status_text}")
                     
                     # Reset PID state when toggling
@@ -555,12 +788,51 @@ class FaceHeatTracker:
                     self.previous_error_y = 0.0
                     self.previous_error_z = 0.0
                     
-                    if not self.tracking_active:
-                        # Stop robot immediately when pausing and notify control loop is paused
+                    if not self.face_tracking_active:
+                        # Stop robot immediately when pausing
                         self.robot.send_program("stopl(0.5)")
-                        print("Control loop paused - arrow keys now available")
+                        print("Face tracking paused - arrow keys available when thermal is also off")
                     else:
-                        print("Control loop resumed - arrow keys disabled")
+                        print("Face tracking active - arrow keys disabled")
+                        
+                elif key == ord(' '):  # SPACE - Emergency Stop
+                    print("EMERGENCY STOP ACTIVATED!")
+                    # Turn off all tracking modes
+                    self.face_tracking_active = False
+                    self.thermal_tracking_active = False
+                    
+                    # Reset PID state
+                    self.error_integral_y = 0.0
+                    self.error_integral_z = 0.0
+                    self.previous_error_y = 0.0
+                    self.previous_error_z = 0.0
+                    
+                    # Send emergency stop command
+                    self.robot.send_program("stopl(0.1)")  # Quick stop
+                    print("All tracking stopped - Robot emergency stopped - Arrow keys available")
+                        
+                elif key == ord('t') or key == ord('T'):  # T - Thermal tracking toggle
+                    if self.face_tracking_active:
+                        # Turn off face tracking first
+                        self.face_tracking_active = False
+                        print("Face tracking turned OFF")
+                    
+                    self.thermal_tracking_active = not self.thermal_tracking_active
+                    status_text = "ACTIVATED" if self.thermal_tracking_active else "DEACTIVATED"
+                    print(f"Thermal tracking {status_text}")
+                    
+                    # Reset PID state when toggling
+                    self.error_integral_y = 0.0
+                    self.error_integral_z = 0.0
+                    self.previous_error_y = 0.0
+                    self.previous_error_z = 0.0
+                    
+                    if not self.thermal_tracking_active:
+                        # Stop robot immediately when pausing
+                        self.robot.send_program("stopl(0.5)")
+                        print("Thermal tracking paused - arrow keys available when face is also off")
+                    else:
+                        print("Thermal tracking active - arrow keys disabled")
                 
             except Exception as e:
                 print(f"Main loop error: {e}")
