@@ -229,21 +229,43 @@ class SpaceMouseRobotController:
             return None
     
     def send_relative_movement(self, movement):
-        """Send relative movement commands directly to robot, including wrist joints, with deadzone check. Uses speedl for translation."""
+        """Send relative movement commands directly to robot, including wrist joints, with deadzone check. Uses speedl for translation with cubic scaling."""
         if not movement:
             return
         movement_threshold = 0.7
         raw_axes = movement['raw_axes']
-        dx = movement['x'] * self.translation_scale
-        dy = movement['y'] * self.translation_scale
-        dz = movement['z'] * self.translation_scale
-        wrist1_vel = movement['wrist1'] * self.rotation_scale
-        wrist2_vel = movement['wrist2'] * self.rotation_scale
-        wrist3_vel = movement['wrist3'] * self.rotation_scale
+        
+        # Apply exponential scaling to translation for more precise control
+        # Small movements become much smaller, large movements maintain max speed
+        def exp_scale(x):
+            if x == 0:
+                return 0
+            # First subtract deadzone and normalize to make movements just outside deadzone even slower
+            abs_x = abs(x)
+            deadzone = 0.6
+            if abs_x <= deadzone:
+                return 0
+            
+            # Remap from [deadzone, 1.0] to [0.0, 1.0]
+            normalized_x = (abs_x - deadzone) / (1.0 - deadzone)
+            
+            # Apply exponential scaling: (e^(5*|x|) - 1) / (e^5 - 1)
+            exp_factor = 5.0  # Controls steepness of exponential curve - higher = more exponential
+            scaled = (math.exp(exp_factor * normalized_x) - 1) / (math.exp(exp_factor) - 1)
+            return scaled if x > 0 else -scaled
+        
+        dx = exp_scale(movement['x']) * self.translation_scale
+        dy = exp_scale(movement['y']) * self.translation_scale
+        dz = exp_scale(movement['z']) * self.translation_scale
+        
+        # Apply exponential scaling to wrist rotations as well
+        wrist1_vel = exp_scale(movement['wrist1']) * self.rotation_scale
+        wrist2_vel = exp_scale(movement['wrist2']) * self.rotation_scale
+        wrist3_vel = exp_scale(movement['wrist3']) * self.rotation_scale
         # If all axes are below threshold, stop robot with stopl and stop wrist motion with speedj
         if all(abs(axis) < movement_threshold for axis in raw_axes):
-            self.robot.send_program("stopl(0.5)")
-            self.robot.send_program("speedj([0,0,0,0,0,0], 2.0, 0.05)")
+            self.robot.send_program("stopl(0.2)")
+            self.robot.send_program("speedj([0,0,0,0,0,0], 0.4, 0.05)")
             return
         # If any translation, send speedl in TCP frame
         if abs(dx) > 0.0001 or abs(dy) > 0.0001 or abs(dz) > 0.0001:
@@ -279,7 +301,7 @@ class SpaceMouseRobotController:
         time.sleep(2)
         
         # Open camera
-        cam = cv2.VideoCapture(1)
+        cam = cv2.VideoCapture(0)
         if not cam.isOpened():
             print("Could not open camera at index 1!")
             self.robot.close()
@@ -294,7 +316,7 @@ class SpaceMouseRobotController:
                 # --- CAMERA VIEW ---
                 ret, frame = cam.read()
                 if ret:
-                    frame = cv2.flip(frame, -1)  # Flip vertically
+                    frame = cv2.flip(frame, 1)  # Flip vertically
                     cv2.imshow("Camera View (ESC to quit, SPACE to toggle control)", frame)
                 else:
                     cv2.imshow("Camera View (ESC to quit, SPACE to toggle control)", np.zeros((480,640,3), dtype=np.uint8))

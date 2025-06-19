@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # === CONFIGURATION ===
-THERMAL_CAMERA_INDEX = 1  # Change if your HIKMICRO camera uses a different index
+THERMAL_CAMERA_INDEX = 0  # Change if your HIKMICRO camera uses a different index
 WINDOW_NAME = "Thermal Heat Tracking"
 
 
