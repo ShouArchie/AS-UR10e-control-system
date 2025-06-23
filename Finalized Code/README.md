@@ -23,6 +23,7 @@ Finalized Code/
 ├── camera_manager.py      # Camera initialization and management
 ├── detection_algorithms.py # Face and thermal detection algorithms
 ├── robot_controller.py    # Robot connection and PID control
+├── spacemouse_controller.py # 3D Space Mouse control integration
 ├── main_tracker.py        # Main application entry point
 └── README.md             # This file
 ```
@@ -57,6 +58,14 @@ Robot control and PID system:
 - Emergency stop and safety features
 - Arrow key manual control
 
+### `spacemouse_controller.py`
+3D Space Mouse integration:
+- 3D Connexion Space Mouse connection and input processing
+- Full 6DOF control (translation and rotation)
+- Exponential scaling for precise control
+- Only active when tracking modes are disabled
+- Real-time movement with configurable deadzone and scaling
+
 ### `main_tracker.py`
 Main application coordinator:
 - Integrates all components
@@ -74,7 +83,7 @@ Main application coordinator:
 ## Software Dependencies
 
 ```bash
-pip install opencv-python mediapipe urx keyboard numpy
+pip install opencv-python mediapipe urx keyboard numpy pygame
 ```
 
 ## Usage
@@ -90,9 +99,11 @@ pip install opencv-python mediapipe urx keyboard numpy
 2. **Controls**:
    - **F**: Toggle face tracking ON/OFF
    - **T**: Toggle thermal tracking ON/OFF
+   - **H**: Return to starting position
    - **SPACE**: Emergency stop (stops all tracking and robot)
    - **UP/DOWN arrows**: Manual X-axis movement (only when both tracking modes are OFF)
    - **ESC**: Exit application
+   - **Space Mouse**: Automatically active when both tracking modes are OFF
 
 ### Tracking Modes
 
@@ -108,13 +119,22 @@ pip install opencv-python mediapipe urx keyboard numpy
   - Conservative PID gains for precision
   - Tracks hottest regions with area filtering
 
+- **Space Mouse Control**:
+  - Full 6DOF control (translation + 3 wrist rotations)
+  - Max translation speed: 0.15 m/s, Max rotation speed: 0.3 rad/s
+  - Automatically active when both tracking modes are disabled
+  - Exponential scaling for precise control
+  - Real-time response with configurable deadzone and speed limits
+
 ### Safety Features
 
 - Only one tracking mode can be active at a time
 - Emergency stop immediately disables all tracking
 - Deadzone prevents jittery movement near center
 - Speed limits prevent dangerous movements
-- Arrow keys only work when both tracking modes are disabled
+- Arrow keys and Space Mouse only work when both tracking modes are disabled
+- Space Mouse automatically activates/deactivates based on tracking state
+- Space Mouse requires pygame library for input handling
 
 ## Configuration
 
@@ -146,8 +166,13 @@ REGULAR_CAMERA_FPS = 60
 ### Speed Limits
 
 ```python
+# Tracking mode speed limits
 MAX_SPEED_Y_FACE = 2.5      # Face tracking max speed
 MAX_SPEED_Y_THERMAL = 0.5   # Thermal tracking max speed
+
+# Space Mouse speed limits
+SPACEMOUSE_MAX_TRANSLATION_SPEED = 0.15  # Max translation speed (m/s)
+SPACEMOUSE_MAX_ROTATION_SPEED = 0.3      # Max rotation speed (rad/s)
 ```
 
 ## API Usage

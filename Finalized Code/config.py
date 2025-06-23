@@ -74,4 +74,14 @@ THERMAL_HEAT_THRESHOLD = 0.9  # 90% of max value for heat detection
 MIN_HEAT_AREA = 200       # Minimum area in pixels for valid heat regions
 
 # === CONTROL LOOP SETTINGS ===
-CONTROL_LOOP_FREQUENCY = 60  # Hz - PID control loop frequency 
+CONTROL_LOOP_FREQUENCY = 60  # Hz - PID control loop frequency
+
+# === SPACE MOUSE CONFIGURATION ===
+SPACEMOUSE_TRANSLATION_SCALE = 0.3  # Scale factor for translation (m per axis unit)
+SPACEMOUSE_ROTATION_SCALE = 0.5     # Scale factor for rotation (rad per axis unit)
+SPACEMOUSE_DEADZONE = 0.6           # Deadzone threshold for all axes
+SPACEMOUSE_UPDATE_RATE = 30         # Hz - Space mouse update frequency
+
+# Space Mouse speed limits (m/s for translation, rad/s for rotation)
+SPACEMOUSE_MAX_TRANSLATION_SPEED = 0.15  # Maximum translation speed (m/s)
+SPACEMOUSE_MAX_ROTATION_SPEED = 0.3      # Maximum rotation speed (rad/s) 

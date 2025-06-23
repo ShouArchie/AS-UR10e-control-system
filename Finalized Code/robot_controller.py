@@ -211,6 +211,42 @@ class RobotController:
         self.robot.send_program("stopl(0.1)")
         print("All tracking stopped - Robot emergency stopped")
     
+    def return_to_starting_position(self):
+        """Return robot to starting position during runtime."""
+        print("Returning to starting position...")
+        
+        # Turn off all tracking first
+        was_face_active = self.face_tracking_active
+        was_thermal_active = self.thermal_tracking_active
+        
+        self.face_tracking_active = False
+        self.thermal_tracking_active = False
+        self._reset_pid_state()
+        
+        try:
+            # Stop current movement
+            self.robot.send_program("stopl(0.5)")
+            time.sleep(0.5)
+            
+            # Move to starting position
+            print(f"Moving to starting position: {[math.degrees(j) for j in START_JOINTS]} degrees")
+            self.robot.movej(START_JOINTS, acc=0.5, vel=0.3)
+            print("✓ Returned to starting position!")
+            
+            # Restore previous tracking states if they were active
+            if was_face_active:
+                print("Reactivating face tracking...")
+                self.face_tracking_active = True
+            elif was_thermal_active:
+                print("Reactivating thermal tracking...")
+                self.thermal_tracking_active = True
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error returning to starting position: {e}")
+            return False
+    
     def set_face_tracking(self, active):
         """Set face tracking state."""
         if active and self.thermal_tracking_active:

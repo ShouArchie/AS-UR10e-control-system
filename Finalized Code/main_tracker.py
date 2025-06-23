@@ -9,6 +9,7 @@ import time
 from camera_manager import CameraManager
 from detection_algorithms import FaceDetector, ThermalDetector
 from robot_controller import RobotController
+from spacemouse_controller import SpaceMouseController
 from config import *
 
 
@@ -21,6 +22,7 @@ class FaceThermalTracker:
         self.face_detector = FaceDetector()
         self.thermal_detector = ThermalDetector()
         self.robot_controller = RobotController()
+        self.spacemouse_controller = SpaceMouseController(self.robot_controller)
         
         # Running state
         self.running = False
@@ -69,15 +71,24 @@ class FaceThermalTracker:
             self.robot_controller.cleanup()
             return False
         
+        # Initialize space mouse (optional - won't fail if not connected)
+        spacemouse_status = self.spacemouse_controller.connect_spacemouse()
+        if spacemouse_status:
+            print("✓ Space Mouse connected!")
+        else:
+            print("⚠ Space Mouse not found - manual controls available via arrows only")
+        
         print("\n✓ All systems ready!")
         print("Controls:")
         print("  F: Toggle face tracking ON/OFF")
         print("  T: Toggle thermal tracking ON/OFF")
+        print("  H: Return to starting position")
         print("  SPACE: EMERGENCY STOP")
         print("  UP/DOWN arrows: Move forward/backward (X-axis) - works only when both tracking modes are OFF")
         print("  ESC: Exit")
         print("\nBoth tracking modes start OFF - press F for face tracking or T for thermal tracking!")
         print("Note: Only one tracking mode can be active at a time. Max speed: Face=2.5m/s, Thermal=0.5m/s")
+        print("Space Mouse: Automatically active when both tracking modes are OFF")
         
         return True
     
@@ -155,15 +166,21 @@ class FaceThermalTracker:
         elif self.robot_controller.thermal_tracking_active:
             status_text = "THERMAL TRACKING ACTIVE (Max Speed: 0.5 m/s)"
             status_color = (0, 0, 255)
+        elif self.spacemouse_controller.spacemouse_active:
+            status_text = f"SPACE MOUSE CONTROL ACTIVE - Max Speed: {SPACEMOUSE_MAX_TRANSLATION_SPEED} m/s"
+            status_color = (255, 0, 255)  # Magenta for space mouse
         else:
-            status_text = "TRACKING OFF - Arrow keys available"
+            if self.spacemouse_controller.spacemouse_connected:
+                status_text = f"TRACKING OFF - Space Mouse Active (Max: {SPACEMOUSE_MAX_TRANSLATION_SPEED} m/s)"
+            else:
+                status_text = "TRACKING OFF - Arrow keys available"
             status_color = (255, 255, 0)
         
         cv2.putText(combined_frame, status_text, (10, combined_frame.shape[0] - 50), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
         
         # Controls info
-        cv2.putText(combined_frame, "F: Face | T: Thermal | SPACE: Emergency Stop | UP/DOWN: X move | ESC: Exit", 
+        cv2.putText(combined_frame, "F: Face | T: Thermal | H: Home | SPACE: Emergency Stop | UP/DOWN: X move | ESC: Exit", 
                    (10, combined_frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, 
                    (255, 255, 255), 2)
         
@@ -186,6 +203,9 @@ class FaceThermalTracker:
             self.robot_controller.set_thermal_tracking(new_state)
             status_text = "ACTIVATED" if new_state else "DEACTIVATED"
             print(f"Thermal tracking {status_text}")
+        elif key == ord('h') or key == ord('H'):  # H - Return to starting position
+            print("H pressed - Returning to starting position...")
+            self.robot_controller.return_to_starting_position()
         
         return True
     
@@ -196,6 +216,10 @@ class FaceThermalTracker:
         
         # Start robot control threads
         self.robot_controller.start_control_threads()
+        
+        # Start space mouse thread if connected
+        if self.spacemouse_controller.spacemouse_connected:
+            self.spacemouse_controller.start_spacemouse_thread()
         
         self.running = True
         
@@ -239,6 +263,7 @@ class FaceThermalTracker:
         # Cleanup components
         self.robot_controller.cleanup()
         self.camera_manager.cleanup()
+        self.spacemouse_controller.cleanup()
         
         # Close OpenCV windows
         cv2.destroyAllWindows()
@@ -258,4 +283,4 @@ if __name__ == "__main__":
         tracker.cleanup()
     except Exception as e:
         print(f"Error: {e}")
-        tracker.cleanup() 
+        tracker.cleanup()
