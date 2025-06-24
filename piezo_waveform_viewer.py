@@ -34,16 +34,21 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
         
         # Configuration
         self.SERIAL_PORT = 'COM7'
-        self.BAUD_RATE = 921600  # Increased for 20kHz data rate (20k samples/sec * 2 bytes = 40KB/s)
-        self.SAMPLE_RATE = 20000  # Hz
-        self.BUFFER_SIZE = 60000  # 3 seconds at 20kHz
+        self.BAUD_RATE = 921600  # Optimized for 18kHz dual-channel data rate (18k sample pairs * 4 bytes = 72KB/s)
+        self.SAMPLE_RATE = 18000  # Hz (total for both channels)
+        self.BUFFER_SIZE = 54000  # 3 seconds at 18kHz
         self.ADC_MAX = 4095  # 12-bit ADC
         self.VOLTAGE_MAX = 3.3  # Opamp powered from 5V, adjust if using voltage divider
         
-        # Performance optimizations - 20kHz OPTIMIZED  
-        self.update_rate_samples = 10   # Update plot every 10 samples for 20kHz
+        # Performance optimizations - 18kHz OPTIMIZED with USB stability
+        self.update_rate_samples = 10   # Update plot every 10 samples for 18kHz
         self.plot_downsample = 2  # Plot every Nth point for performance
-        self.min_bytes_to_process = 2  # Process any available data (minimum 1 sample)
+        self.min_bytes_to_process = 4  # Process minimum 1 sample pair (4 bytes)
+        
+        # Buffer management for USB stability
+        self.max_buffer_bytes = 8000  # Clear buffer if it gets too full
+        self.reconnection_attempts = 0
+        self.max_reconnection_attempts = 3
         
         # Data storage - dual channel ADC values
         self.adc_buffer_A0 = np.zeros(self.BUFFER_SIZE, dtype=np.uint16)  # A0 raw ADC values 0-4095
@@ -86,7 +91,7 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
         
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle('Piezo Sensor Waveform Viewer - 20kHz High Performance')
+        self.setWindowTitle('Piezo Sensor Waveform Viewer - 18kHz Dual Channel (USB Optimized)')
         self.setGeometry(100, 100, 1400, 900)
         
         # Set dark theme
@@ -168,7 +173,7 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
         label_style = {'color': 'white', 'font-size': '12pt'}
         self.plot_widget.setLabel('left', 'ADC Value (0-4095)', **label_style)
         self.plot_widget.setLabel('bottom', 'Sample Index', **label_style)
-        self.plot_widget.setTitle('Dual Piezo Sensors A0/A1 Raw ADC Values (20kHz Real-time)', color='white', size='14pt')
+        self.plot_widget.setTitle('Dual Piezo Sensors A0/A1 Raw ADC Values (18kHz Real-time)', color='white', size='14pt')
         
         # Set consistent plot range for ADC values
         self.plot_widget.setYRange(300, 4500)  # Consistent view range
@@ -266,6 +271,13 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
             # Read available data
             bytes_available = self.serial_connection.in_waiting
             
+            # USB Stability: Clear buffer if it gets too full (prevents Windows serial errors)
+            if bytes_available > self.max_buffer_bytes:
+                print(f"Warning: Buffer overflow detected ({bytes_available} bytes). Clearing buffer for stability.")
+                self.serial_connection.reset_input_buffer()
+                self.reconnection_attempts = 0  # Reset reconnection counter on successful clear
+                return
+            
             # Debug: print bytes available occasionally
             if hasattr(self, '_debug_counter'):
                 self._debug_counter += 1
@@ -275,10 +287,11 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
             if self._debug_counter % 10000 == 0 and bytes_available > 0:
                 print(f"Debug: {bytes_available} bytes available")
             
-            # Process any available data
+            # Process any available data (minimum 4 bytes for dual channel)
             if bytes_available >= self.min_bytes_to_process:
-                # Read all available data
-                data = self.serial_connection.read(bytes_available)
+                # Read data in manageable chunks to prevent overwhelming USB
+                read_chunk_size = min(bytes_available, 4000)  # Read max 4KB at a time for stability
+                data = self.serial_connection.read(read_chunk_size)
                 
                 # Process data in pairs (each sample is 2 bytes)
                 if len(data) >= 2:
@@ -324,98 +337,97 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
                                     print(f"Debug: Odd indices (should be A1): {adc_values[1::2][:5]}")
                                     print(f"Debug: Raw bytes: {[hex(b) for b in data[:20]]}")
                             
-                            # Track ADC extremes for diagnostics (dual channel)
-                            # Note: adc_values contains interleaved A0,A1,A0,A1... data
-                            if len(adc_values) >= 2:
-                                a0_values = adc_values[0::2]  # Every other value starting from 0
-                                a1_values = adc_values[1::2]  # Every other value starting from 1
-                                
-                                if len(a0_values) > 0:
-                                    current_max_a0 = a0_values.max()
-                                    current_min_a0 = a0_values.min()
-                                    if current_max_a0 > self.max_adc_seen_A0:
-                                        self.max_adc_seen_A0 = current_max_a0
-                                    if current_min_a0 < self.min_adc_seen_A0:
-                                        self.min_adc_seen_A0 = current_min_a0
-                                
-                                if len(a1_values) > 0:
-                                    current_max_a1 = a1_values.max()
-                                    current_min_a1 = a1_values.min()
-                                    if current_max_a1 > self.max_adc_seen_A1:
-                                        self.max_adc_seen_A1 = current_max_a1
-                                    if current_min_a1 < self.min_adc_seen_A1:
-                                        self.min_adc_seen_A1 = current_min_a1
-                            
-                            # Store raw ADC values directly (dual channel processing)
-                            raw_adc_values = adc_values.astype(np.uint16)
-                            
                             # Split into A0 and A1 channels (interleaved data: A0,A1,A0,A1...)
-                            if len(raw_adc_values) >= 2:
-                                a0_values = raw_adc_values[0::2]  # A0 values
-                                a1_values = raw_adc_values[1::2]  # A1 values
-                                
-                                # Optional software high-pass filter (removes DC baseline) - per channel
-                                if self.enable_high_pass:
-                                    # Handle A0 baseline
+                            if len(adc_values) >= 2:
+                                a0_values = adc_values[0::2]  # Every other value starting from 0 (A0 channel)
+                                a1_values = adc_values[1::2]  # Every other value starting from 1 (A1 channel)
+                            else:
+                                a0_values = adc_values  # If odd number, take all as A0
+                                a1_values = np.array([])  # Empty A1
+                            
+                            # Track ADC extremes for diagnostics (dual channel)
+                            if len(a0_values) > 0:
+                                current_max_a0 = a0_values.max()
+                                current_min_a0 = a0_values.min()
+                                if current_max_a0 > self.max_adc_seen_A0:
+                                    self.max_adc_seen_A0 = current_max_a0
+                                if current_min_a0 < self.min_adc_seen_A0:
+                                    self.min_adc_seen_A0 = current_min_a0
+                            
+                            if len(a1_values) > 0:
+                                current_max_a1 = a1_values.max()
+                                current_min_a1 = a1_values.min()
+                                if current_max_a1 > self.max_adc_seen_A1:
+                                    self.max_adc_seen_A1 = current_max_a1
+                                if current_min_a1 < self.min_adc_seen_A1:
+                                    self.min_adc_seen_A1 = current_min_a1
+                            
+                                                        # Store raw ADC values directly (dual channel processing)
+                            raw_a0_values = a0_values.astype(np.uint16)
+                            raw_a1_values = a1_values.astype(np.uint16) if len(a1_values) > 0 else np.array([], dtype=np.uint16)
+                            
+                            # Optional software high-pass filter (removes DC baseline) - per channel
+                            if self.enable_high_pass:
+                                # Handle A0 baseline
+                                if len(raw_a0_values) > 0:
                                     if not hasattr(self, 'dc_baseline_A0') or self.dc_baseline_A0 is None:
-                                        self.dc_baseline_A0 = np.mean(a0_values)
+                                        self.dc_baseline_A0 = np.mean(raw_a0_values)
                                     else:
-                                        self.dc_baseline_A0 = 0.999 * self.dc_baseline_A0 + 0.001 * np.mean(a0_values)
-                                    a0_values = a0_values - self.dc_baseline_A0
-                                    
-                                    # Handle A1 baseline
+                                        self.dc_baseline_A0 = 0.999 * self.dc_baseline_A0 + 0.001 * np.mean(raw_a0_values)
+                                    raw_a0_values = raw_a0_values - self.dc_baseline_A0
+                                
+                                # Handle A1 baseline
+                                if len(raw_a1_values) > 0:
                                     if not hasattr(self, 'dc_baseline_A1') or self.dc_baseline_A1 is None:
-                                        self.dc_baseline_A1 = np.mean(a1_values)
+                                        self.dc_baseline_A1 = np.mean(raw_a1_values)
                                     else:
-                                        self.dc_baseline_A1 = 0.999 * self.dc_baseline_A1 + 0.001 * np.mean(a1_values)
-                                    a1_values = a1_values - self.dc_baseline_A1
-                                
-                                # Additional spike filter on ADC level per channel
-                                a0_spikes = (a0_values > self.ADC_MAX) | (a0_values < 0)
-                                a1_spikes = (a1_values > self.ADC_MAX) | (a1_values < 0)
-                                
+                                        self.dc_baseline_A1 = 0.999 * self.dc_baseline_A1 + 0.001 * np.mean(raw_a1_values)
+                                    raw_a1_values = raw_a1_values - self.dc_baseline_A1
+                            
+                            # Additional spike filter on ADC level per channel
+                            if len(raw_a0_values) > 0:
+                                a0_spikes = (raw_a0_values > self.ADC_MAX) | (raw_a0_values < 0)
                                 if np.any(a0_spikes):
                                     spike_count = np.sum(a0_spikes)
                                     print(f"Warning: {spike_count} A0 ADC spikes detected and filtered")
-                                    a0_values = a0_values[~a0_spikes]
-                                
+                                    raw_a0_values = raw_a0_values[~a0_spikes]
+                            
+                            if len(raw_a1_values) > 0:
+                                a1_spikes = (raw_a1_values > self.ADC_MAX) | (raw_a1_values < 0)
                                 if np.any(a1_spikes):
                                     spike_count = np.sum(a1_spikes)
                                     print(f"Warning: {spike_count} A1 ADC spikes detected and filtered")
-                                    a1_values = a1_values[~a1_spikes]
-                                
-                                # Debug: print ADC range per channel
-                                if self._debug_counter % 1000 == 0:
-                                    if len(a0_values) > 0:
-                                        print(f"Debug: A0 - Count: {len(a0_values)}, Range: {a0_values.min()} to {a0_values.max()}, First 5: {a0_values[:5]}")
-                                    if len(a1_values) > 0:
-                                        print(f"Debug: A1 - Count: {len(a1_values)}, Range: {a1_values.min()} to {a1_values.max()}, First 5: {a1_values[:5]}")
-                                    
-                                    # Check if A0 and A1 are too similar (indicating parsing error)
-                                    if len(a0_values) > 0 and len(a1_values) > 0:
-                                        a0_mean = np.mean(a0_values)
-                                        a1_mean = np.mean(a1_values)
-                                        diff = abs(a0_mean - a1_mean)
-                                        print(f"Debug: Channel difference - A0 mean: {a0_mean:.1f}, A1 mean: {a1_mean:.1f}, Diff: {diff:.1f}")
-                                        if diff < 10:  # If channels are too similar, there might be a parsing issue
-                                            print(f"WARNING: Channels are very similar! Possible data parsing issue.")
-                                
-                                # Add to circular buffers for both channels
-                                for a0_val, a1_val in zip(a0_values, a1_values):
-                                    self.adc_buffer_A0[self.buffer_index] = int(a0_val)
-                                    self.adc_buffer_A1[self.buffer_index] = int(a1_val)
-                                    self.buffer_index = (self.buffer_index + 1) % self.BUFFER_SIZE
-                                    if self.buffer_index == 0:
-                                        self.buffer_full = True
-                                    self.current_sample += 1
-                                    self.samples_received += 1
+                                    raw_a1_values = raw_a1_values[~a1_spikes]
                             
-                                # Debug: Check if data is being stored
-                                if self._debug_counter % 1000 == 0:
-                                    print(f"Debug: Stored {min(len(a0_values), len(a1_values))} dual-channel ADC values, buffer_index now: {self.buffer_index}")
-                                    print(f"Debug: Last few A0 buffer values: {self.adc_buffer_A0[max(0, self.buffer_index-3):self.buffer_index]}")
-                                    print(f"Debug: Last few A1 buffer values: {self.adc_buffer_A1[max(0, self.buffer_index-3):self.buffer_index]}")
-                                    print(f"Debug: Current sample count: {self.current_sample}, buffer_full: {self.buffer_full}")
+                            # Debug: print ADC range per channel
+                            if self._debug_counter % 1000 == 0:
+                                if len(raw_a0_values) > 0:
+                                    print(f"Debug: A0 ADC range: {raw_a0_values.min()} to {raw_a0_values.max()}")
+                                if len(raw_a1_values) > 0:
+                                    print(f"Debug: A1 ADC range: {raw_a1_values.min()} to {raw_a1_values.max()}")
+                            
+                            # Add to circular buffers for both channels
+                            # Handle case where we might have different numbers of A0 and A1 samples
+                            min_samples = min(len(raw_a0_values), len(raw_a1_values)) if len(raw_a1_values) > 0 else len(raw_a0_values)
+                            
+                            for i in range(min_samples):
+                                self.adc_buffer_A0[self.buffer_index] = int(raw_a0_values[i])
+                                if len(raw_a1_values) > 0:
+                                    self.adc_buffer_A1[self.buffer_index] = int(raw_a1_values[i])
+                                else:
+                                    self.adc_buffer_A1[self.buffer_index] = 0  # Default for missing A1
+                                self.buffer_index = (self.buffer_index + 1) % self.BUFFER_SIZE
+                                if self.buffer_index == 0:
+                                    self.buffer_full = True
+                                self.current_sample += 1
+                                self.samples_received += 1
+                            
+                            # Debug: Check if data is being stored
+                            if self._debug_counter % 1000 == 0:
+                                print(f"Debug: Stored {min_samples} dual-channel ADC values, buffer_index now: {self.buffer_index}")
+                                print(f"Debug: Last few A0 buffer values: {self.adc_buffer_A0[max(0, self.buffer_index-3):self.buffer_index]}")
+                                print(f"Debug: Last few A1 buffer values: {self.adc_buffer_A1[max(0, self.buffer_index-3):self.buffer_index]}")
+                                print(f"Debug: Current sample count: {self.current_sample}, buffer_full: {self.buffer_full}")
                             
                             # Update plot MUCH more frequently - after every batch!
                             self.update_plot()
@@ -436,6 +448,28 @@ class PiezoWaveformViewer(QtWidgets.QMainWindow):
         
         except Exception as e:
             print(f"Data acquisition error: {e}")
+            
+            # Enhanced error recovery for Windows serial communication errors
+            if "ClearCommError" in str(e) or "PermissionError" in str(e):
+                self.reconnection_attempts += 1
+                print(f"USB/Serial communication error detected. Reconnection attempt {self.reconnection_attempts}/{self.max_reconnection_attempts}")
+                
+                if self.reconnection_attempts <= self.max_reconnection_attempts:
+                    # Try to recover by clearing buffers and reconnecting
+                    try:
+                        if self.serial_connection:
+                            self.serial_connection.reset_input_buffer()
+                            self.serial_connection.reset_output_buffer()
+                    except:
+                        pass  # Ignore errors during cleanup
+                    
+                    self.disconnect_serial()
+                    QtCore.QTimer.singleShot(1000, self.connect_serial)  # Reconnect after 1 second
+                    return
+                else:
+                    print("Maximum reconnection attempts reached. Please check hardware connection.")
+                    self.reconnection_attempts = 0
+            
             self.disconnect_serial()
             
     def update_plot(self):
