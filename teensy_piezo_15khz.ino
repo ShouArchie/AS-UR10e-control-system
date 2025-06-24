@@ -1,31 +1,34 @@
 /*
  * Teensy 4.0 Piezo Sensor Data Acquisition - High Performance Edition
  * 
- * Reads analog input from pin A0 at 15 kHz sampling rate
+ * Reads analog input from pin A0 at 20 kHz sampling rate
  * Sends raw 12-bit ADC values (0-4095) over USB Serial
  * Uses IntervalTimer for precise timing and buffering for efficiency
  * 
  * Hardware:
  * - Teensy 4.0
- * - Piezo sensor with 20x opamp circuit connected to A0
- * - Input voltage range: 0-3.3V
+ * - Piezo sensor #1 with 20x opamp circuit connected to A0
+ * - Piezo sensor #2 with 20x opamp circuit connected to A1
+ * - Input voltage range: 0-3.3V per channel
  * 
  * Serial Protocol:
- * - Baud rate: 1000000 (1 Mbaud for faster transmission)
- * - Data format: Binary, 2 bytes per sample (little-endian)
+ * - Baud rate: 921600 (optimized for 20kHz data rate)
+ * - Data format: Binary, 4 bytes per sample pair (A0, A1 interleaved, little-endian)
  * - Buffered transmission for efficiency
  */
 
-#define ANALOG_PIN A0
-#define SAMPLE_RATE_HZ 15000
-#define SAMPLE_INTERVAL_US (1000000 / SAMPLE_RATE_HZ)  // 66.67 microseconds
+#define ANALOG_PIN_1 A0
+#define ANALOG_PIN_2 A1
+#define SAMPLE_RATE_HZ 20000
+#define SAMPLE_INTERVAL_US (1000000 / SAMPLE_RATE_HZ)  // 50 microseconds
 
 // Buffer settings for efficient transmission
-#define BUFFER_SIZE 100  // Buffer 100 samples before sending
+#define BUFFER_SIZE 100  // Buffer 100 samples before sending (per channel)
 #define ADC_RESOLUTION 12  // 12-bit ADC (0-4095)
 
-// Data buffer
-uint16_t sampleBuffer[BUFFER_SIZE];
+// Data buffers for dual channel
+uint16_t sampleBuffer_A0[BUFFER_SIZE];
+uint16_t sampleBuffer_A1[BUFFER_SIZE];
 volatile int bufferIndex = 0;
 volatile bool bufferReady = false;
 
@@ -37,8 +40,9 @@ unsigned long lastStatsTime = 0;
 IntervalTimer sampleTimer;
 
 void setup() {
-  // Configure analog input
-  pinMode(ANALOG_PIN, INPUT);
+  // Configure analog inputs
+  pinMode(ANALOG_PIN_1, INPUT);
+  pinMode(ANALOG_PIN_2, INPUT);
   
   // Set ADC resolution to 12 bits
   analogReadResolution(ADC_RESOLUTION);
@@ -50,8 +54,8 @@ void setup() {
   // Optimize ADC settings for speed
   analogReadAveraging(1);  // No averaging for maximum speed
   
-  // Initialize serial communication
-  Serial.begin(500000);  // 500k baud for reliability
+  // Initialize serial communication  
+  Serial.begin(921600);  // Higher baud rate for 20kHz sampling
   
   // Wait for serial connection (optional - comment out for standalone operation)
   while (!Serial) {
@@ -59,9 +63,9 @@ void setup() {
   }
   
   // Send startup message
-  Serial.println("Teensy 4.0 Piezo Sensor - High Performance 15kHz ADC");
-  Serial.println("Optimized with IntervalTimer and buffering");
-  Serial.println("Starting data acquisition...");
+  Serial.println("Teensy 4.0 Dual Piezo Sensor - High Performance 20kHz ADC");
+  Serial.println("Reading A0 and A1 simultaneously with IntervalTimer and buffering");
+  Serial.println("Starting dual channel data acquisition...");
   delay(1000);
   
   // Clear the startup text from serial buffer
@@ -74,12 +78,14 @@ void setup() {
 }
 
 void sampleISR() {
-  // This runs every 66.67 microseconds (15 kHz)
-  // Read analog value from A0
-  uint16_t adcValue = analogRead(ANALOG_PIN);
+  // This runs every 50 microseconds (20 kHz)
+  // Read analog values from both A0 and A1
+  uint16_t adcValue_A0 = analogRead(ANALOG_PIN_1);
+  uint16_t adcValue_A1 = analogRead(ANALOG_PIN_2);
   
-  // Store in buffer
-  sampleBuffer[bufferIndex] = adcValue;
+  // Store in buffers
+  sampleBuffer_A0[bufferIndex] = adcValue_A0;
+  sampleBuffer_A1[bufferIndex] = adcValue_A1;
   bufferIndex++;
   sampleCount++;
   
@@ -97,8 +103,11 @@ void loop() {
     noInterrupts();
     bufferReady = false;
     
-    // Send entire buffer at once for efficiency
-    Serial.write((uint8_t*)sampleBuffer, BUFFER_SIZE * 2);
+    // Send both buffers interleaved (A0, A1, A0, A1, ...)
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+      Serial.write((uint8_t*)&sampleBuffer_A0[i], 2);  // Send A0 sample (2 bytes)
+      Serial.write((uint8_t*)&sampleBuffer_A1[i], 2);  // Send A1 sample (2 bytes)
+    }
     
     interrupts();
   }
