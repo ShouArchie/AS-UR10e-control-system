@@ -297,13 +297,30 @@ impl HighPerfDataCollector {
         (times, voltages)
     }
     
-    fn get_stats(&self) -> (u64, u32, f64) {
+    /// Return (total_samples, batch_count, estimated_sample_rate_hz, seconds_since_last_batch)
+    fn get_stats(&self) -> (u64, u32, f64, f64) {
         let total = *self.total_samples.lock().unwrap();
         let batches = *self.batch_count.lock().unwrap();
-        let last_update = *self.last_update.lock().unwrap();
-        let age = last_update.elapsed().as_secs_f64();
-        
-        (total, batches, age)
+
+        // ----- Compute elapsed time since first batch -----
+        let elapsed = {
+            let start_guard = self.start_time.lock().unwrap();
+            match *start_guard {
+                Some(t0) => t0.elapsed().as_secs_f64(),
+                None => 0.0,
+            }
+        };
+
+        // Avoid division by zero on first call(s)
+        let est_rate = if elapsed > 0.0 {
+            total as f64 / elapsed
+        } else {
+            0.0
+        };
+
+        let since_last = self.last_update.lock().unwrap().elapsed().as_secs_f64();
+
+        (total, batches, est_rate, since_last)
     }
 }
 
@@ -430,14 +447,14 @@ impl eframe::App for PiezoMonitorApp {
             });
             
             // Statistics
-            let (total_samples, batch_count, age) = self.collector.get_stats();
+            let (total_samples, batch_count, est_rate, since_last) = self.collector.get_stats();
             ui.horizontal(|ui| {
                 ui.label(format!("📊 Samples: {}", total_samples));
                 ui.label(format!("📦 Batches: {}", batch_count));
-                ui.label(format!("⏱️ Rate: {:.0} Hz", if age < 1.0 { 60000.0 } else { 0.0 }));
+                ui.label(format!("⏱️ Rate: {:.0} Hz", est_rate));
                 
-                let status_color = if age < 2.0 { egui::Color32::GREEN } else { egui::Color32::RED };
-                ui.colored_label(status_color, if age < 2.0 { "🟢 LIVE" } else { "🔴 STALE" });
+                let status_color = if since_last < 2.0 { egui::Color32::GREEN } else { egui::Color32::RED };
+                ui.colored_label(status_color, if since_last < 2.0 { "🟢 LIVE" } else { "🔴 STALE" });
             });
             
             ui.separator();
