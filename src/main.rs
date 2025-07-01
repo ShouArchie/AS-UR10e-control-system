@@ -12,13 +12,13 @@ use realfft::RealFftPlanner;
 
 
 // High-performance circular buffer for voltage data - OPTIMIZED FOR 60kHz
-const BUFFER_SIZE: usize = 1_000_000; // 10 seconds at 100kHz
-const DISPLAY_SAMPLES: usize = 50_000; // Show last 0.5 seconds at 100kHz
+const BUFFER_SIZE: usize = 2_000_000; // 10 seconds at 200kHz
+const DISPLAY_SAMPLES: usize = 100_000; // Show last 0.5 seconds at 200kHz
 const FFT_SIZE: usize = 8192;
 const UPDATE_RATE_MS: u64 = 16; // ~60 FPS; GUI overhead down
 
-const SAMPLES_PER_BATCH: usize = 1000; // Must match firmware (0.01s batches)
-const PACKET_SIZE: usize = 2 + 4 + SAMPLES_PER_BATCH * 2; // 2006 bytes
+const SAMPLES_PER_BATCH: usize = 2000; // Must match firmware (0.01s batches)
+const PACKET_SIZE: usize = 2 + 4 + SAMPLES_PER_BATCH * 2; // 4006 bytes
 
 #[derive(Clone, Debug)]
 struct DataBatch {
@@ -57,7 +57,7 @@ impl HighPerfDataCollector {
         Self {
             voltage_buffer: Arc::new(Mutex::new(AllocRingBuffer::new(BUFFER_SIZE))),
             time_buffer: Arc::new(Mutex::new(AllocRingBuffer::new(BUFFER_SIZE))),
-            sample_rate: 100000.0, // Updated to 100kHz
+            sample_rate: 200000.0, // Updated to 200kHz
             total_samples: Arc::new(Mutex::new(0)),
             batch_count: Arc::new(Mutex::new(0)),
             last_update: Arc::new(Mutex::new(Instant::now())),
@@ -219,7 +219,7 @@ impl HighPerfDataCollector {
             // Timing diagnostics: measure wall-clock time over 100 batches
             let mut t0_wall: Option<Instant> = None;
             let mut id0: u32 = 0;
-
+            
             while *running.lock().unwrap() {
                 match receiver.recv_timeout(Duration::from_millis(25)) { // Faster processing for 60kHz
                     Ok(batch) => {
@@ -360,7 +360,7 @@ impl HighPerfDataCollector {
         };
 
         let since_last = self.last_update.lock().unwrap().elapsed().as_secs_f64();
-
+        
         (total, batches, est_rate, since_last)
     }
 }

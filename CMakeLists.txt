@@ -9,8 +9,8 @@ set(CMAKE_ASM_COMPILER "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-no
 # Set Pico SDK path
 set(PICO_SDK_PATH "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/pico-sdk")
 
-# Include the Pico SDK import script
-include(pico_sdk_import.cmake)
+# Include the Pico SDK import script via absolute path
+include("${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
 
 # Define the project
 project(pico_adc_sampler C CXX ASM)

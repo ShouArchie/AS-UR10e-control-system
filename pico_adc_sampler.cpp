@@ -13,8 +13,8 @@
 
 #define ADC_PIN_NUM 26      // GPIO 26 is ADC 0
 #define ADC_CHANNEL 0       // ADC channel for GPIO 26
-#define SAMPLE_RATE 100000   // 100kHz sampling rate
-#define SAMPLES_PER_BATCH 1000    // 0.01 second worth of samples at 100kHz
+#define SAMPLE_RATE 200000   // 200kHz sampling rate
+#define SAMPLES_PER_BATCH 2000    // 0.01 second worth of samples at 200kHz
 
 volatile uint32_t sample_index = 0;
 static uint16_t raw_buffers[2][SAMPLES_PER_BATCH];      // Double buffer for ping-pong DMA
@@ -65,7 +65,7 @@ int main() {
     }
     
     printf("=== PICO FAST SAMPLER v4.0 ===\n");
-    printf("Config: 100kHz, 1k samples per batch, 0.01s intervals\n");
+    printf("Config: 200kHz, 2k samples per batch, 0.01s intervals\n");
     printf("GPIO: 26 (ADC0)\n");
     printf("Optimized for speed\n");
     fflush(stdout);
