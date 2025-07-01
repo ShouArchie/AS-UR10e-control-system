@@ -5,6 +5,8 @@ ENV/
 .venv/
 .env/
 
+
+target/
 # Python
 __pycache__/
 *.py[cod]
@@ -86,4 +88,47 @@ Thumbs.db
 # Project specific
 *.log
 temp/
-tmp/ 
+tmp/
+
+# ──────────────────────────────
+# Rust
+# ──────────────────────────────
+/target/
+**/*.rlib
+**/*.rmeta
+
+# Cargo local build, coverage, etc.
+**/Cargo.lock
+
+# ──────────────────────────────
+# C & C++ (Pico SDK / CMake / Ninja)
+# ──────────────────────────────
+/build/
+**/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiled objects & binaries
+**/*.o
+**/*.obj
+**/*.d
+**/*.elf
+**/*.uf2
+**/*.hex
+**/*.bin
+**/*.a
+**/*.so
+**/*.dll
+**/*.exe
+**/*.pdb
+
+# Generated intermediate directories (e.g. cargo or cmake deps)
+**/deps/
+
+# ──────────────────────────────
+# Miscellaneous
+# ──────────────────────────────
+.DS_Store
+Thumbs.db 

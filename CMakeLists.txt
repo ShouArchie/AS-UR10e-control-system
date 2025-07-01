@@ -1,40 +1,44 @@
-# This is the build configuration file for CMake.
-
-# Boilerplate: Set minimum required version of CMake.
+# CMakeLists.txt for Pico ADC Sampler
 cmake_minimum_required(VERSION 3.13)
 
-# This pulls in the Pico SDK, which is required.
-# It will either find it from the PICO_SDK_PATH environment variable
-# or from a git submodule.
+# Set compiler paths directly
+set(CMAKE_C_COMPILER "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe")
+set(CMAKE_CXX_COMPILER "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-g++.exe")
+set(CMAKE_ASM_COMPILER "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe")
+
+# Set Pico SDK path
+set(PICO_SDK_PATH "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/pico-sdk")
+
+# Include the Pico SDK import script
 include(pico_sdk_import.cmake)
 
-# Define the project name and specify it's a C/C++ project.
-project(adc_sampler_40khz C CXX ASM)
+# Define the project
+project(pico_adc_sampler C CXX ASM)
 
-# Set the C standard to C11 and C++ standard to C++17.
+# Set C/C++ standards
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# Initialize the Pico SDK for our project.
+# Initialize the Pico SDK
 pico_sdk_init()
 
-# Add our source file to create an executable.
-# The name of the final executable will be "adc_sampler".
-add_executable(adc_sampler
-    adc_sampler.cpp
+# Add the executable for our ADC sampler
+add_executable(pico_adc_sampler
+    pico_adc_sampler.cpp
 )
 
-# Enable USB serial output for our executable.
-pico_enable_stdio_usb(adc_sampler 1)
+# Enable USB serial output
+pico_enable_stdio_usb(pico_adc_sampler 1)
 
-# Link the required hardware libraries to our executable.
-# - hardware_adc is needed for ADC functions.
-# - hardware_timer is needed for timer interrupt functions.
-target_link_libraries(adc_sampler pico_stdlib hardware_adc hardware_timer)
+# Link required libraries
+target_link_libraries(pico_adc_sampler 
+    pico_stdlib 
+    hardware_adc 
+    hardware_dma
+)
 
-# This command creates the final .uf2 file that you can drag and drop
-# onto the Pico's bootloader drive.
-pico_add_extra_outputs(adc_sampler)
+# Create additional output files (.uf2, .hex, etc.)
+pico_add_extra_outputs(pico_adc_sampler)
 
-# Print a message after the build is done.
-message(STATUS "Build successful! Drag and drop adc_sampler.uf2 onto your Pico.") 
+# Print build success message
+message(STATUS "Build configured! Use 'cmake --build build' to compile.") 
