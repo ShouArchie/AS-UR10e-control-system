@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>  // memcpy
 #include "pico/stdlib.h"
 #include "pico/stdio_usb.h"
 #include "hardware/adc.h"
@@ -8,41 +9,59 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "pico/stdio.h"
+#include "tusb.h"   // TinyUSB direct API
 
 #define ADC_PIN_NUM 26      // GPIO 26 is ADC 0
 #define ADC_CHANNEL 0       // ADC channel for GPIO 26
 #define SAMPLE_RATE 60000   // 60kHz sampling rate
-#define SAMPLES_PER_BATCH 3000    // 0.05 second worth of samples at 60kHz
+#define SAMPLES_PER_BATCH 600     // 0.01 second worth of samples at 60kHz
 
 volatile uint32_t sample_index = 0;
-static uint16_t raw_buffer[SAMPLES_PER_BATCH];          // Raw 12-bit ADC samples
+static uint16_t raw_buffers[2][SAMPLES_PER_BATCH];      // Double buffer for ping-pong DMA
 static volatile uint32_t batch_number = 0;
 
 // Pico ADC reference voltage (used only for host-side conversion)
 #define ADC_REF_VOLTAGE 3.3f
 #define ADC_MAX_VALUE 4095.0f
 
-static inline void send_bytes(const uint8_t* data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        putchar_raw((int)data[i]);
+// Binary packet format:
+// [0]   0xA5
+// [1]   0x5A
+// [2..5] uint32_t batch_id (little-endian)
+// [6..]  3000 * uint16_t raw ADC samples
+static void send_batch_binary(const uint16_t *samples, uint32_t id) {
+    // Build a contiguous packet
+    static uint8_t tx_buffer[2 + 4 + SAMPLES_PER_BATCH * 2];
+    tx_buffer[0] = 0xA5;
+    tx_buffer[1] = 0x5A;
+    memcpy(&tx_buffer[2], &id, sizeof(id));
+    memcpy(&tx_buffer[6], samples, SAMPLES_PER_BATCH * sizeof(uint16_t));
+
+    // Send via TinyUSB CDC directly (bypass stdio buffering)
+    size_t sent = 0;
+    while (sent < sizeof(tx_buffer)) {
+        // Attempt to write remaining bytes
+        uint32_t n = tud_cdc_write(tx_buffer + sent, sizeof(tx_buffer) - sent);
+        if (n == 0) {
+            // Buffer full or not ready – service USB and retry
+            tud_task();
+            sleep_us(50);
+            continue;
+        }
+        sent += n;
+        tud_cdc_write_flush();
+        tud_task();
     }
 }
 
-// Binary packet format: 0xA5 0x5A | uint32_t batch_id | uint16_t samples[3000]
-void send_batch_binary() {
-    const uint8_t header[2] = { 0xA5, 0x5A };
-    send_bytes(header, 2);
-    send_bytes((const uint8_t*)&batch_number, sizeof(batch_number));
-    send_bytes((const uint8_t*)raw_buffer, sizeof(uint16_t) * SAMPLES_PER_BATCH);
-}
-
 int main() {
-    // Initialise USB stdio (includes CDC)
+    // Initialise USB (stdio+TinyUSB)
     stdio_init_all();
 
-    // Wait until host opens the port – avoids losing the banner
-    while (!stdio_usb_connected()) {
-        sleep_ms(100);
+    // Wait until the USB stack is mounted and the host opens the CDC port
+    while (!tud_cdc_connected()) {
+        tud_task();        // service USB events while waiting
+        sleep_ms(10);
     }
     
     printf("=== PICO FAST SAMPLER v4.0 ===\n");
@@ -75,21 +94,40 @@ int main() {
     printf("Status: Ready for fast sampling...\n");
     fflush(stdout);
     
-    // ------------- MAIN ACQUISITION LOOP (DMA) -------------
+    // ------------------ DOUBLE-BUFFERED LOOP ------------------
+    int fill_idx = 0;   // buffer being filled by DMA
+    int send_idx = 1;   // buffer we will transmit next
+
+    // Prime the first DMA transfer so that we always have a buffer to send
+    dma_channel_configure(
+        dma_chan,
+        &cfg,
+        raw_buffers[fill_idx],
+        &adc_hw->fifo,
+        SAMPLES_PER_BATCH,
+        true  // start
+    );
+
     while (true) {
-        // Kick DMA – it will block until SAMPLES_PER_BATCH samples are in raw_buffer
+        // Wait until the current DMA transfer into raw_buffers[fill_idx] completes
+        dma_channel_wait_for_finish_blocking(dma_chan);
+
+        // Immediately kick DMA to the OTHER buffer so sampling continues while we transmit
         dma_channel_configure(
             dma_chan,
             &cfg,
-            raw_buffer,           // dst
-            &adc_hw->fifo,        // src
-            SAMPLES_PER_BATCH,    // length
-            true                  // start immediately and BLOCK (we wait for finish)
+            raw_buffers[send_idx],   // next fill buffer
+            &adc_hw->fifo,
+            SAMPLES_PER_BATCH,
+            true  // start
         );
 
-        // Send the batch in binary (raw ADC counts)
-        send_batch_binary();
-        batch_number++;
+        // Now transmit the buffer that just finished (fill_idx)
+        send_batch_binary(raw_buffers[fill_idx], batch_number++);
+
+        // Swap roles for next iteration
+        fill_idx ^= 1;
+        send_idx ^= 1;
     }
     
     return 0;

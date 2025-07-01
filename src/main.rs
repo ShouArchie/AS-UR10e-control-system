@@ -17,8 +17,8 @@ const DISPLAY_SAMPLES: usize = 30_000; // Show last 0.5 seconds at 60kHz
 const FFT_SIZE: usize = 8192;
 const UPDATE_RATE_MS: u64 = 16; // ~60 FPS; GUI overhead down
 
-const SAMPLES_PER_BATCH: usize = 3000; // Must match firmware
-const PACKET_SIZE: usize = 2 + 4 + SAMPLES_PER_BATCH * 2; // 6006 bytes
+const SAMPLES_PER_BATCH: usize = 600; // Must match firmware (0.01s batches)
+const PACKET_SIZE: usize = 2 + 4 + SAMPLES_PER_BATCH * 2; // 1206 bytes
 
 #[derive(Clone, Debug)]
 struct DataBatch {
@@ -92,6 +92,12 @@ impl HighPerfDataCollector {
     }
     
     fn start_collection(&self, port_name: String) {
+        // ----- Reset statistics for a fresh session -----
+        *self.total_samples.lock().unwrap() = 0;
+        *self.batch_count.lock().unwrap() = 0;
+        *self.start_time.lock().unwrap() = None;
+        *self.current_time_offset.lock().unwrap() = 0.0;
+
         *self.running.lock().unwrap() = true;
         
         // Clone necessary data for the thread
@@ -101,8 +107,8 @@ impl HighPerfDataCollector {
         thread::spawn(move || {
             println!("Starting high-speed data collection on {}", port_name);
             
-            let mut port = match serialport::new(&port_name, 1000000) // 1M baud for maximum USB throughput
-                .timeout(Duration::from_millis(25)) // Fast timeout for 60kHz
+            let mut port = match serialport::new(&port_name, 12_000_000) // 12M baud for maximum USB throughput
+                .timeout(Duration::from_millis(100)) // More headroom for full packet arrival
                 .open()
             {
                 Ok(port) => port,
@@ -208,9 +214,26 @@ impl HighPerfDataCollector {
         thread::spawn(move || {
             println!("Starting data processing thread");
             
+            // Track previous batch-ID to detect missing packets
+            let mut last_id: Option<u32> = None;
+            // Timing diagnostics: measure wall-clock time over 100 batches
+            let mut t0_wall: Option<Instant> = None;
+            let mut id0: u32 = 0;
+
             while *running.lock().unwrap() {
                 match receiver.recv_timeout(Duration::from_millis(25)) { // Faster processing for 60kHz
                     Ok(batch) => {
+                        // --- Check for skipped batch IDs ---
+                        if let Some(prev) = last_id {
+                            let diff = batch.batch_id.wrapping_sub(prev);
+                            if diff != 1 {
+                                println!("⚠️  Batch ID jump: {} -> {} (missed {})", prev, batch.batch_id, diff.saturating_sub(1));
+                            }
+                        }
+                        // Debug: print every batch ID received
+                        println!("Received batch ID {}", batch.batch_id);
+                        last_id = Some(batch.batch_id);
+                        
                         let batch_size = batch.voltages.len();
                         
                         // Initialize start time on first batch
@@ -250,6 +273,24 @@ impl HighPerfDataCollector {
                         if batch.batch_id % 10 == 0 {
                             println!("Processed batch {}: {} samples, time offset: {:.3}s", 
                                    batch.batch_id, batch_size, time_offset);
+                        }
+
+                        // ----- Wall-clock rate diagnostic -----
+                        if t0_wall.is_none() {
+                            t0_wall = Some(Instant::now());
+                            id0 = batch.batch_id;
+                        }
+                        if let Some(t0) = t0_wall {
+                            let batches_since = batch.batch_id.wrapping_sub(id0);
+                            if batches_since == 100 {
+                                let elapsed = t0.elapsed().as_secs_f64();
+                                let samples = batches_since as f64 * SAMPLES_PER_BATCH as f64;
+                                let rate = samples / elapsed;
+                                println!("=== Diagnostic: {} batches, {:.3} s -> {:.1} samples/s ===", batches_since, elapsed, rate);
+                                // reset measurement
+                                t0_wall = Some(Instant::now());
+                                id0 = batch.batch_id;
+                            }
                         }
                     }
                     Err(_) => {
