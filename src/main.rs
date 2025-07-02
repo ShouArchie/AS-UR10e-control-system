@@ -431,16 +431,19 @@ impl PiezoMonitorApp {
         let mut spectrum = fft.make_output_vec();
         fft.process(&mut self.fft_buffer, &mut spectrum).unwrap();
         
-        // Convert to magnitude and create plot points
+        let sample_rate = self.collector.sample_rate; // current configured SR
+
+        // Convert to magnitude and assemble points limited to 0-100 kHz
         spectrum.iter()
             .enumerate()
             .take(FFT_SIZE / 2)
-            .skip(1) // Skip DC component
-            .map(|(i, complex)| {
-                let magnitude = (complex.re * complex.re + complex.im * complex.im).sqrt();
-                [self.fft_freqs[i], magnitude as f64]
+            .skip(1) // skip DC
+            .filter_map(|(i, complex)| {
+                let freq = i as f64 * sample_rate / FFT_SIZE as f64;
+                if freq > 100_000.0 { return None; }
+                let magnitude = (complex.re * complex.re + complex.im * complex.im).sqrt() as f64;
+                if magnitude > 1e-6 { Some([freq, magnitude]) } else { None }
             })
-            .filter(|[freq, mag]| *freq > 0.0 && *mag > 1e-6)
             .collect()
     }
 }
