@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
-use serialport::SerialPortType;
+use serialport::{SerialPortType, SerialPort};
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,8 @@ use realfft::RealFftPlanner;
 
 
 // High-performance circular buffer for voltage data - OPTIMIZED FOR 60kHz
-const BUFFER_SIZE: usize = 2_000_000; // 10 seconds at 200kHz
-const DISPLAY_SAMPLES: usize = 100_000; // Show last 0.5 seconds at 200kHz
+const BUFFER_SIZE: usize = 1_000_000; // 10 seconds at 200kHz
+const DISPLAY_SAMPLES: usize = 400_000; // Show last 0.5 seconds at 200kHz
 const FFT_SIZE: usize = 8192;
 const UPDATE_RATE_MS: u64 = 16; // ~60 FPS; GUI overhead down
 
@@ -74,8 +74,13 @@ impl HighPerfDataCollector {
             Ok(ports) => {
                 for port in &ports {
                     if let SerialPortType::UsbPort(usb_info) = &port.port_type {
-                        if usb_info.vid == 0x2E8A { // Pico VID
-                            println!("Found Pico on {}", port.port_name);
+                        // Accept either Raspberry Pi Pico (0x2E8A) or PJRC Teensy (0x16C0) VID
+                        if usb_info.vid == 0x2E8A || usb_info.vid == 0x16C0 {
+                            println!(
+                                "Found data device (VID=0x{:04X}) on {}",
+                                usb_info.vid,
+                                port.port_name
+                            );
                             return Some(port.port_name.clone());
                         }
                     }
@@ -107,8 +112,22 @@ impl HighPerfDataCollector {
         thread::spawn(move || {
             println!("Starting high-speed data collection on {}", port_name);
             
-            let mut port = match serialport::new(&port_name, 12_000_000) // 12M baud for maximum USB throughput
-                .timeout(Duration::from_millis(100)) // More headroom for full packet arrival
+            // Detect VID to choose a compatible line speed (Teensy CDC rejects 12M).
+            let mut line_speed = 12_000_000u32;
+            if let Ok(ports) = serialport::available_ports() {
+                for p in &ports {
+                    if p.port_name == port_name {
+                        if let serialport::SerialPortType::UsbPort(info) = &p.port_type {
+                            if info.vid == 0x16C0 {
+                                line_speed = 921_600; // Teensy 4.x accepted speed
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut port = match serialport::new(&port_name, line_speed)
+                .timeout(Duration::from_millis(100))
                 .open()
             {
                 Ok(port) => port,
@@ -117,6 +136,12 @@ impl HighPerfDataCollector {
                     return;
                 }
             };
+            
+            // Assert DTR so Teensy firmware starts transmitting
+            #[allow(unused)]
+            if let Err(e) = port.write_data_terminal_ready(true) {
+                println!("Warning: Could not assert DTR: {}", e);
+            }
             
             let mut buf = [0u8; PACKET_SIZE];
             let mut last_batch_time = Instant::now();
@@ -433,14 +458,14 @@ impl PiezoMonitorApp {
         
         let sample_rate = self.collector.sample_rate; // current configured SR
 
-        // Convert to magnitude and assemble points limited to 0-100 kHz
+        // Convert to magnitude and assemble points limited to 10-100 kHz
         spectrum.iter()
             .enumerate()
             .take(FFT_SIZE / 2)
             .skip(1) // skip DC
             .filter_map(|(i, complex)| {
                 let freq = i as f64 * sample_rate / FFT_SIZE as f64;
-                if freq > 100_000.0 { return None; }
+                if freq < 10_000.0 || freq > 100_000.0 { return None; }
                 let magnitude = (complex.re * complex.re + complex.im * complex.im).sqrt() as f64;
                 if magnitude > 1e-6 { Some([freq, magnitude]) } else { None }
             })
