@@ -4,7 +4,7 @@ Contains all configurable parameters and settings
 """
 
 # === ROBOT CONFIGURATION ===
-ROBOT_IP = "192.168.0.101"
+ROBOT_IP = "192.168.10.255"
 
 # === CAMERA CONFIGURATION ===
 THERMAL_CAMERA_INDEX = 0
